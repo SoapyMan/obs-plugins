@@ -100,8 +100,6 @@ public:
 
 		obs_properties_add_text(props, "ipaddr", obs_module_text("Quest IP Address"), OBS_TEXT_DEFAULT);
 
-		obs_properties_add_int(props, "port", obs_module_text("Port"), 1025, 65535, 1);
-
 		obs_properties_add_bool(props, "scan_sockets", obs_module_text("Automatically scan for devices"));
 
 		obs_properties_add_bool(props, "use_adb", obs_module_text("(Beta) Stream over USB"));
