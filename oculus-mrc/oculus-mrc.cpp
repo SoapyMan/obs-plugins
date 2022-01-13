@@ -54,6 +54,8 @@ extern "C" {
 #define OM_DEFAULT_AUDIO_SAMPLERATE 48000
 #define OM_DEFAULT_IP_ADDRESS "192.168.0.1"
 #define OM_DEFAULT_PORT 28734
+#define OM_DEFAULT_USEADB true
+
 
 std::string GetAvErrorString(int errNum)
 {
@@ -100,15 +102,19 @@ public:
 
 		obs_properties_add_int(props, "port", obs_module_text("Port"), 1025, 65535, 1);
 
+		obs_properties_add_bool(props, "scan_sockets", obs_module_text("Automatically scan for devices"));
+
+		obs_properties_add_bool(props, "use_adb", obs_module_text("(Beta) Stream over USB"));
+
 		obs_property_t* connectButton = obs_properties_add_button(props, "connect",
-			obs_module_text("Connect to MRC-enabled game running on Quest"), [](obs_properties_t *props,
+			obs_module_text("Connect to MRCPlus/Quest MRC"), [](obs_properties_t *props,
 				obs_property_t *property, void *data) {
 			return ((OculusMrcSource *)data)->ConnectClicked(props, property);
 		});
 		obs_property_set_enabled(connectButton, context->m_connectSocket == INVALID_SOCKET);
 
 		obs_property_t* disconnectButton = obs_properties_add_button(props, "disconnect",
-			obs_module_text("Disconnect from Quest game"), [](obs_properties_t *props,
+			obs_module_text("Disconnect"), [](obs_properties_t *props,
 				obs_property_t *property, void *data) {
 			return ((OculusMrcSource *)data)->DisconnectClicked(props, property);
 		});
@@ -147,6 +153,7 @@ public:
 		obs_data_set_default_int(settings, "height", OM_DEFAULT_HEIGHT);
 		obs_data_set_default_string(settings, "ipaddr", OM_DEFAULT_IP_ADDRESS);
 		obs_data_set_default_int(settings, "port", OM_DEFAULT_PORT);
+		obs_data_set_default_bool(settings, "use_adb", OM_DEFAULT_USEADB);
 	}
 
 	void VideoTick(float /*seconds*/)
@@ -290,6 +297,7 @@ private:
 	uint32_t m_audioSampleRate = OM_DEFAULT_AUDIO_SAMPLERATE;
 	std::string m_ipaddr = OM_DEFAULT_IP_ADDRESS;
 	uint32_t m_port = OM_DEFAULT_PORT;
+	bool m_usbMode = OM_DEFAULT_USEADB;
 
 	std::mutex m_updateMutex;
 
@@ -316,9 +324,10 @@ private:
 
 	void Update(obs_data_t* settings)
 	{
+		m_usbMode = obs_data_get_bool(settings, "use_adb");
 		m_width = (uint32_t)obs_data_get_int(settings, "width");
 		m_height = (uint32_t)obs_data_get_int(settings, "height");
-		m_ipaddr = obs_data_get_string(settings, "ipaddr");
+		m_ipaddr = m_usbMode ? "127.0.0.1" : obs_data_get_string(settings, "ipaddr");
 		m_port = (uint32_t)obs_data_get_int(settings, "port");
 	}
 
@@ -593,6 +602,12 @@ private:
 
 	void Connect()
 	{
+		if (m_usbMode) {
+			m_ipaddr = "127.0.0.1";
+			std::string adbcommand = string_format("adb forward tcp:%d tcp:%d", m_port, m_port);
+			system(adbcommand.c_str());
+		}
+
 		if (m_connectSocket != INVALID_SOCKET)
 		{
 			OM_BLOG(LOG_ERROR, "Already connected");
@@ -658,7 +673,9 @@ private:
 			if (hasError)
 			{
 				OM_BLOG(LOG_ERROR, "Unable to connect");
-				MessageBox(NULL, TEXT("Please verify the Quest IP address, and if MRC-enabled game is running on Quest.\n\nReboot the headset and re-launch the game if the issue remains."), TEXT("Connection failed"), MB_OK);
+
+				if (m_usbMode) MessageBox(NULL, TEXT("Check that your Quest is plugged in and MRCPlus is installed.\n\nNote: SideQuest must be installed to connect via USB."), TEXT("USB connection failed"), MB_OK);
+				else MessageBox(NULL, TEXT("Please ensure the Quest IP Address is correct and MRCPlus is enabled.\n\nReboot the headset and re-launch the game if the issue remains."), TEXT("Connection failed"), MB_OK);
 				closesocket(m_connectSocket);
 				m_connectSocket = INVALID_SOCKET;
 			}
@@ -693,6 +710,11 @@ private:
 		{
 			OM_BLOG(LOG_ERROR, "Not connected");
 			return;
+		}
+
+		if (m_usbMode) {
+			std::string adbcommand = string_format("adb forward --remove tcp:%d", m_port);
+			system(adbcommand.c_str());
 		}
 
 		StopDecoder();
