@@ -84,6 +84,17 @@ public:
 		else return "";
 	}
 
+	static void DisplayMessage(LPCWSTR message, LPCWSTR title, unsigned long flags)
+	{
+		auto asyncmsg = [](LPCWSTR message_p, LPCWSTR title_p, unsigned long flags_p)
+		{
+			MessageBox(NULL, message_p, title_p, flags_p);
+		};
+		flags |= MB_SYSTEMMODAL;
+		auto msgthread = std::thread(asyncmsg, message, title, flags);
+		msgthread.detach();
+	}
+
 	static void Update(void *data, obs_data_t *settings)
 	{
 		OculusMrcSource *context = (OculusMrcSource*)data;
@@ -226,7 +237,7 @@ private:
 
 		if (adb_installed == 1)
 		{
-			MessageBox(NULL, TEXT("ADB is missing from your system's PATH.\n\nIs SideQuest installed?"), TEXT("ADB not installed!"), MB_OK);
+			DisplayMessage(TEXT("ADB is missing from your system's PATH.\n\nIs SideQuest installed?"), TEXT("ADB not installed!"), MB_OK);
 		}
 
 		obs_enter_graphics();
@@ -705,8 +716,8 @@ private:
 			{
 				OM_BLOG(LOG_ERROR, "Unable to connect");
 
-				if (m_usbMode) MessageBox(NULL, TEXT("Check that your Quest is plugged in and MRCPlus is installed.\n\nNote: SideQuest must be installed to connect via USB."), TEXT("USB connection failed"), MB_OK);
-				else MessageBox(NULL, TEXT("Please ensure the Quest IP Address is correct and MRCPlus is enabled.\n\nReboot the headset and re-launch the game if the issue remains."), TEXT("Connection failed"), MB_OK);
+				if (m_usbMode) DisplayMessage(TEXT("Check that your Quest is plugged in and MRCPlus is installed.\n\nNote: SideQuest must be installed to connect via USB."), TEXT("USB connection failed"), MB_OK);
+				else DisplayMessage(TEXT("Please ensure the Quest IP Address is correct and MRCPlus is enabled.\n\nReboot the headset and re-launch the game if the issue remains."), TEXT("Connection failed"), MB_OK);
 				closesocket(m_connectSocket);
 				m_connectSocket = INVALID_SOCKET;
 			}
