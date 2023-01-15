@@ -449,6 +449,7 @@ private:
 
 								struct AudioDataHeader {
 									uint64_t timestamp;
+									//int unknownProp;
 									int channels;
 									int dataLength;
 								};
@@ -553,6 +554,14 @@ private:
 					std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
 					OM_BLOG(LOG_DEBUG, "[%f][AUDIO_DATA] timestamp %llu", timePassed.count());
 #endif
+				}
+				else if ( frame->m_type == (Frame::PayloadType)16)
+				{
+					OM_BLOG(LOG_DEBUG, "[PLAYLOAD_16] New Enum has value of %d", *(uint32_t*)(frame->m_payload.data()));
+				}
+				else if ( frame->m_type == (Frame::PayloadType)15)
+				{
+					OM_BLOG(LOG_DEBUG, "[PLAYLOAD_15] New Enum has value of %d", *(uint32_t*)(frame->m_payload.data()));
 				}
 				else
 				{
