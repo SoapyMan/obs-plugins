@@ -337,7 +337,7 @@ private:
 	gs_texture_t * m_temp_texture = nullptr;
 	gs_effect_t* m_mrc_effect = nullptr;
 
-	AVCodec* m_codec = nullptr;
+	const AVCodec* m_codec = nullptr;
 	AVCodecContext* m_codecContext = nullptr;
 
 	SOCKET m_connectSocket = INVALID_SOCKET;
@@ -784,7 +784,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 bool obs_module_load(void)
 {
-	avcodec_register_all();
+	// avcodec_register_all();
 
 	// Initialize Winsock
 	WSADATA wsaData = { 0 };
