@@ -669,6 +669,8 @@ private:
 		if (iResult != 0)
 		{
 			OM_BLOG(LOG_ERROR, "getaddrinfo failed: %d", iResult);
+			DisplayMessage(TEXT("The IP address you provided is not valid.\n\nPlease check that your Quest IP Address matches what is shown in BMBF."), TEXT("Invalid IP address!"), MB_OK);
+			return;
 		}
 
 		ptr = result;
