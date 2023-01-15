@@ -54,7 +54,7 @@ extern "C" {
 #define OM_DEFAULT_AUDIO_SAMPLERATE 48000
 #define OM_DEFAULT_IP_ADDRESS "192.168.0.1"
 #define OM_DEFAULT_PORT 28734
-#define OM_DEFAULT_USEADB true
+#define OM_DEFAULT_USEADB false
 
 
 std::string GetAvErrorString(int errNum)
@@ -72,6 +72,15 @@ public:
 	static const char* GetName(void*)
 	{
 		return obs_module_text("OculusMrcSource");
+	}
+
+	std::string GetAdbPath()
+	{
+		char* appdatap = std::getenv("APPDATA");
+		std::filesystem::path sqpath(appdatap);
+		sqpath /= "SideQuest/platform-tools/";
+		if (std::filesystem::is_directory(sqpath)) return sqpath.string().c_str();
+		else return "";
 	}
 
 	static void Update(void *data, obs_data_t *settings)
@@ -204,6 +213,14 @@ private:
 		else
 		{
 			OM_BLOG(LOG_INFO, "Codec found. Capabilities 0x%x", m_codec->capabilities);
+		}
+
+		std::string adb_cmd = GetAdbPath() + "adb version";
+		int adb_installed = system(adb_cmd.c_str());
+
+		if (adb_installed == 1)
+		{
+			MessageBox(NULL, TEXT("ADB is missing from your system's PATH.\n\nIs SideQuest installed?"), TEXT("ADB not installed!"), MB_OK);
 		}
 
 		obs_enter_graphics();
@@ -611,8 +628,9 @@ private:
 	{
 		if (m_usbMode) {
 			m_ipaddr = "127.0.0.1";
-			std::string adbcommand = string_format("adb forward tcp:%d tcp:%d", m_port, m_port);
-			system(adbcommand.c_str());
+			std::string adb_forwardcmd = string_format("adb forward tcp:%d tcp:%d", m_port, m_port);
+			std::string adb_cmd = GetAdbPath() + adb_forwardcmd;
+			system(adb_cmd.c_str());
 		}
 
 		if (m_connectSocket != INVALID_SOCKET)
@@ -720,8 +738,9 @@ private:
 		}
 
 		if (m_usbMode) {
-			std::string adbcommand = string_format("adb forward --remove tcp:%d", m_port);
-			system(adbcommand.c_str());
+			std::string adb_forwardcmd = string_format("adb forward --remove tcp:%d", m_port);
+			std::string adb_cmd = GetAdbPath() + adb_forwardcmd;
+			system(adb_cmd.c_str());
 		}
 
 		StopDecoder();
