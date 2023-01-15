@@ -25,6 +25,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <stdio.h>
 #include <stdint.h>
 
+#include <filesystem>
 #include <string>
 #include <mutex>
 
@@ -109,9 +110,13 @@ public:
 
 		obs_properties_add_text(props, "ipaddr", obs_module_text("Quest IP Address"), OBS_TEXT_DEFAULT);
 
-		obs_properties_add_bool(props, "scan_sockets", obs_module_text("Automatically scan for devices"));
+		//obs_properties_add_bool(props, "scan_sockets", obs_module_text("Automatically scan for devices"));
 
 		obs_properties_add_bool(props, "use_adb", obs_module_text("(Beta) Stream over USB"));
+
+		obs_property_t* info_sound = obs_properties_add_button(props, "info_sound", obs_module_text("Sound not working correctly? Follow these steps."), nullptr);
+		obs_property_button_set_type(info_sound, OBS_BUTTON_URL);
+		obs_property_button_set_url(info_sound, "https://github.com/Raemien/MRCPlus/wiki/OBS-Audio-Fix");
 
 		obs_property_t* connectButton = obs_properties_add_button(props, "connect",
 			obs_module_text("Connect to MRCPlus/Quest MRC"), [](obs_properties_t *props,
@@ -178,6 +183,7 @@ public:
 	void RefreshButtons(obs_properties_t* props)
 	{
 		obs_property_set_enabled(obs_properties_get(props, "connect"), m_connectSocket == INVALID_SOCKET);
+		obs_property_set_enabled(obs_properties_get(props, "use_adb"), m_connectSocket == INVALID_SOCKET);
 		obs_property_set_enabled(obs_properties_get(props, "disconnect"), m_connectSocket != INVALID_SOCKET);
 	}
 
