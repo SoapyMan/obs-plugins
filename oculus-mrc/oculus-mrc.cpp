@@ -95,6 +95,24 @@ static bool isSocketInvalid(SOCKET socket)
 #endif
 }
 
+static bool isHwDevice(const AVCodec* c, enum AVHWDeviceType type, enum AVPixelFormat* hw_format)
+{
+	for (int i = 0;; i++) {
+		const AVCodecHWConfig* config = avcodec_get_hw_config(c, i);
+		if (!config) {
+			break;
+		}
+
+		if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+			config->device_type == type) {
+			*hw_format = config->pix_fmt;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static std::string GetAvErrorString(int errNum)
 {
 	char buf[1024];
@@ -274,10 +292,6 @@ private:
 			gs_texture_destroy(m_temp_texture);
 			m_temp_texture = nullptr;
 		}
-		if (m_swsContext) {
-			sws_freeContext(m_swsContext);
-			m_swsContext = nullptr;
-		}
 		obs_leave_graphics();
 	}
 
@@ -299,6 +313,34 @@ private:
 			return;
 		}
 
+		// Hardware acceleration for decoding
+		{
+			enum AVHWDeviceType hw_priority[] = {
+				AV_HWDEVICE_TYPE_D3D11VA,      AV_HWDEVICE_TYPE_DXVA2,
+				AV_HWDEVICE_TYPE_CUDA,         AV_HWDEVICE_TYPE_VAAPI,
+				AV_HWDEVICE_TYPE_VDPAU,        AV_HWDEVICE_TYPE_QSV,
+				AV_HWDEVICE_TYPE_VIDEOTOOLBOX, AV_HWDEVICE_TYPE_NONE,
+			};
+
+			enum AVHWDeviceType* priority = hw_priority;
+
+			while (*priority != AV_HWDEVICE_TYPE_NONE) {
+				if (isHwDevice(m_codec, *priority, &m_codecHwPixFmt)) {
+					const int ret = av_hwdevice_ctx_create(&m_codecHwCtx, *priority,	nullptr, nullptr, 0);
+					if (ret == 0)
+						break;
+				}
+				priority++;
+			}
+
+			if (m_codecHwCtx) {
+				OM_BLOG(LOG_INFO, "Using HW device context");
+				m_codecContext->hw_device_ctx = av_buffer_ref(m_codecHwCtx);
+			} else {
+				OM_BLOG(LOG_ERROR, "No HW device support, using software decoder");
+			}
+		}
+
 		AVDictionary *dict = nullptr;
 		int ret = avcodec_open2(m_codecContext, m_codec, &dict);
 		av_dict_free(&dict);
@@ -308,15 +350,34 @@ private:
 			return;
 		}
 
+		m_avPacket = av_packet_alloc();
+		m_avPicture = av_frame_alloc();
+		m_avPictureHw = av_frame_alloc();
+
 		OM_BLOG(LOG_INFO, "m_codecContext constructed and opened");
 	}
 
 	void StopDecoder()
 	{
+		if (m_swsContext) {
+			sws_freeContext(m_swsContext);
+			m_swsContext = nullptr;
+		}
+
+		av_frame_free(&m_avPicture);
+		av_frame_free(&m_avPictureHw);
+		av_packet_free(&m_avPacket);
+
+		m_codecHwPixFmt = AV_PIX_FMT_NONE;
+
 		if (m_codecContext) {
 			avcodec_close(m_codecContext);
 			avcodec_free_context(&m_codecContext);
 			OM_BLOG(LOG_INFO, "m_codecContext freed");
+		}
+
+		if (m_codecHwCtx) {
+			av_buffer_unref(&m_codecHwCtx);
 		}
 
 		if (m_temp_texture) {
@@ -337,12 +398,18 @@ private:
 
 	std::mutex m_updateMutex;
 
-	obs_source_t *m_src = nullptr;
-	gs_texture_t *m_temp_texture = nullptr;
-	gs_effect_t *m_mrc_effect = nullptr;
+	obs_source_t* m_src = nullptr;
+	gs_texture_t* m_temp_texture = nullptr;
+	gs_effect_t* m_mrc_effect = nullptr;
 
-	const AVCodec *m_codec = nullptr;
-	AVCodecContext *m_codecContext = nullptr;
+	AVPacket* m_avPacket = nullptr;
+	AVFrame* m_avPicture = nullptr;
+	AVFrame* m_avPictureHw = nullptr;
+	
+	const AVCodec* m_codec = nullptr;
+	AVCodecContext* m_codecContext = nullptr;
+	AVBufferRef* m_codecHwCtx = nullptr;
+	AVPixelFormat m_codecHwPixFmt = AV_PIX_FMT_NONE;
 
 	SOCKET m_connectSocket = INVALID_SOCKET;
 	FrameCollection m_frameCollection;
@@ -354,7 +421,9 @@ private:
 	int m_swsContext_DestWidth = 0;
 	int m_swsContext_DestHeight = 0;
 
-	std::vector<std::pair<int, std::shared_ptr<Frame>>> m_cachedAudioFrames;
+	uint8_t* m_codecScaleData = nullptr;
+
+	std::list<std::pair<int, std::shared_ptr<Frame>>> m_cachedAudioFrames;
 	int m_audioFrameIndex = 0;
 	int m_videoFrameIndex = 0;
 
@@ -373,202 +442,204 @@ private:
 
 	void ReceiveData()
 	{
-		if (!isSocketInvalid(m_connectSocket)) {
-			for (;;) {
-				fd_set socketSet = {0};
-				FD_ZERO(&socketSet);
-				FD_SET(m_connectSocket, &socketSet);
+		if (isSocketInvalid(m_connectSocket)) {
+			return;
+		}
 
-				timeval t = {0, 0};
-				int num = select(0, &socketSet, nullptr, nullptr, &t);
-				if (num >= 1) {
-					const int bufferSize = 65536;
-					uint8_t buf[bufferSize];
-					int iResult = recv(m_connectSocket, (char *)buf, bufferSize, 0);
-					if (iResult < 0) {
-						OM_BLOG(LOG_ERROR, "recv error %d, closing socket", iResult);
-						Disconnect();
-					} else if (iResult == 0) {
-						OM_BLOG(LOG_INFO, "recv 0 bytes, closing socket");
-						Disconnect();
-					} else {
-						//OM_BLOG(LOG_INFO, "recv: %d bytes received", iResult);
-						m_frameCollection.AddData(buf, iResult);
-					}
+		for (;;) {
+			fd_set socketSet = {0};
+			FD_ZERO(&socketSet);
+			FD_SET(m_connectSocket, &socketSet);
+
+			timeval t = {0, 0};
+			int num = select(0, &socketSet, nullptr, nullptr, &t);
+			if (num >= 1) {
+
+				static const int bufferSize = 65536;
+				uint8_t buf[bufferSize];
+
+				const int iResult = recv(m_connectSocket, (char *)buf, bufferSize, 0);
+				if (iResult < 0) {
+					OM_BLOG(LOG_ERROR, "recv error %d, closing socket", iResult);
+					Disconnect();
+				} else if (iResult == 0) {
+					OM_BLOG(LOG_INFO, "recv 0 bytes, closing socket");
+					Disconnect();
 				} else {
-					break;
+					//OM_BLOG(LOG_INFO, "recv: %d bytes received", iResult);
+					m_frameCollection.AddData(buf, iResult);
 				}
+			} else {
+				break;
+			}
+		}
+	}
+
+	void ProcessAudioFrames()
+	{
+		while (m_cachedAudioFrames.size() > 0 && m_cachedAudioFrames.front().first <= m_videoFrameIndex) {
+			std::shared_ptr<Frame> audioFrame = m_cachedAudioFrames.front().second;
+			m_cachedAudioFrames.pop_front();
+
+			const AudioDataHeader* audioDataHeader = (AudioDataHeader*)(audioFrame->m_payload.data());
+			
+			if (audioDataHeader->channels == 1 || audioDataHeader->channels == 2) {
+				obs_source_audio audio = { 0 };
+				audio.data[0] = (uint8_t*)audioFrame->m_payload.data() + sizeof(AudioDataHeader);
+				audio.frames = audioDataHeader->dataLength / sizeof(float) / audioDataHeader->channels;
+				audio.speakers = audioDataHeader->channels == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO;
+				audio.format = AUDIO_FORMAT_FLOAT;
+				audio.samples_per_sec = m_audioSampleRate;
+				audio.timestamp = audioDataHeader->timestamp;
+				obs_source_output_audio(m_src, &audio);
+			} else {
+				OM_BLOG(LOG_ERROR, "[AUDIO_DATA] unimplemented audio channels %d", audioDataHeader->channels);
 			}
 		}
 	}
 
 	void VideoTickImpl()
 	{
-		if (!isSocketInvalid(m_connectSocket)) {
-			ReceiveData();
+		if (isSocketInvalid(m_connectSocket))
+			return;
 
-			if (isSocketInvalid(m_connectSocket)) // socket disconnected
-				return;
+		ReceiveData();
 
-			//std::chrono::time_point<std::chrono::system_clock> startTime = std::chrono::system_clock::now();
-			while (m_frameCollection.HasCompletedFrame()) {
-				//std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - startTime;
-				//if (timePassed.count() > 0.05)
-				//	break;
+		if (isSocketInvalid(m_connectSocket)) // socket disconnected
+			return;
 
-				auto frame = m_frameCollection.PopFrame();
+		//std::chrono::time_point<std::chrono::system_clock> startTime = std::chrono::system_clock::now();
+		while (m_frameCollection.HasCompletedFrame()) {
+			//std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - startTime;
+			//if (timePassed.count() > 0.05)
+			//	break;
 
-				//auto current_time = std::chrono::system_clock::now();
-				//auto seconds_since_epoch = std::chrono::duration<double>(current_time.time_since_epoch()).count();
-				//double latency = seconds_since_epoch - frame->m_secondsSinceEpoch;
+			auto frame = m_frameCollection.PopFrame();
 
-				if (frame->m_type ==
-				    PayloadType::VIDEO_DIMENSION) {
-					struct FrameDimension {
-						int w;
-						int h;
-					};
-					const FrameDimension *dim = (const FrameDimension *)frame->m_payload.data();
-					m_width = dim->w;
-					m_height = dim->h;
+			//auto current_time = std::chrono::system_clock::now();
+			//auto seconds_since_epoch = std::chrono::duration<double>(current_time.time_since_epoch()).count();
+			//double latency = seconds_since_epoch - frame->m_secondsSinceEpoch;
 
-					OM_BLOG(LOG_INFO, "[VIDEO_DIMENSION] width %d height %d", m_width, m_height);
-				} else if (frame->m_type ==
-					   PayloadType::VIDEO_DATA) {
-					AVPacket *packet = av_packet_alloc();
-					AVFrame *picture = av_frame_alloc();
+			if (frame->m_type == PayloadType::VIDEO_DIMENSION) {
+				const FrameDimension *dim = (const FrameDimension *)frame->m_payload.data();
+				m_width = dim->w;
+				m_height = dim->h;
 
-					av_new_packet(packet, (int)frame->m_payload.size());
-					assert(packet->data);
-					memcpy(packet->data, frame->m_payload.data(), frame->m_payload.size());
+				OM_BLOG(LOG_INFO, "[VIDEO_DIMENSION] width %d height %d", m_width, m_height);
+			} else if (frame->m_type == PayloadType::VIDEO_DATA) {
+				av_new_packet(m_avPacket, (int)frame->m_payload.size());
+				assert(m_avPacket->data);
+				memcpy(m_avPacket->data, frame->m_payload.data(), frame->m_payload.size());
 
-					int ret = avcodec_send_packet( m_codecContext, packet);
-					if (ret < 0) {
-						OM_BLOG(LOG_ERROR, "avcodec_send_packet error %s", GetAvErrorString(ret).c_str());
-					} else {
-						ret = avcodec_receive_frame(m_codecContext, picture);
-						if (ret < 0) {
-							OM_BLOG(LOG_ERROR, "avcodec_receive_frame error %s", GetAvErrorString(ret).c_str());
-						} else {
-#if _DEBUG
-							std::chrono::duration<double> timePassed =std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
-							OM_BLOG(LOG_DEBUG, "[%f][VIDEO_DATA] size %d width %d height %d format %d",
-								timePassed.count(), packet->size, picture->width, picture->height, picture->format);
-#endif
-
-							while (m_cachedAudioFrames.size() > 0 && m_cachedAudioFrames[0].first <= m_videoFrameIndex) {
-								std::shared_ptr<Frame> audioFrame = m_cachedAudioFrames[0].second;
-
-								struct AudioDataHeader {
-									uint64_t timestamp;
-									//int unknownProp;
-									int channels;
-									int dataLength;
-								};
-								AudioDataHeader *audioDataHeader = (AudioDataHeader*)(audioFrame->m_payload.data());
-
-								if (audioDataHeader->channels == 1 || audioDataHeader->channels == 2) {
-									obs_source_audio audio = {0};
-									audio.data[0] = (uint8_t *)audioFrame->m_payload.data() + sizeof(AudioDataHeader);
-									audio.frames = audioDataHeader->dataLength / sizeof(float) / audioDataHeader->channels;
-									audio.speakers = audioDataHeader->channels == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO;
-									audio.format = AUDIO_FORMAT_FLOAT;
-									audio.samples_per_sec = m_audioSampleRate;
-									audio.timestamp = audioDataHeader->timestamp;
-									obs_source_output_audio(m_src, &audio);
-								} else {
-									OM_BLOG(LOG_ERROR,
-										"[AUDIO_DATA] unimplemented audio channels %d",
-										audioDataHeader
-											->channels);
-								}
-
-								m_cachedAudioFrames.erase(m_cachedAudioFrames.begin());
-							}
-
-							++m_videoFrameIndex;
-
-							if (m_swsContext != nullptr) {
-								if (m_swsContext_SrcWidth != m_codecContext->width ||
-								    m_swsContext_SrcHeight != m_codecContext->height ||
-								    m_swsContext_SrcPixelFormat != m_codecContext->pix_fmt ||
-								    m_swsContext_DestWidth != m_codecContext->width ||
-								    m_swsContext_DestHeight !=  m_codecContext->height) {
-									OM_BLOG(LOG_DEBUG, "Need recreate m_swsContext");
-									sws_freeContext(m_swsContext);
-									m_swsContext = nullptr;
-								}
-							}
-
-							if (m_swsContext == nullptr) {
-								m_swsContext = sws_getContext(
-									m_codecContext->width, m_codecContext->height,
-									m_codecContext->pix_fmt,
-									m_codecContext->width, m_codecContext->height,
-									AV_PIX_FMT_RGBA,
-									SWS_POINT,
-									nullptr,
-									nullptr,
-									nullptr);
-								m_swsContext_SrcWidth = m_codecContext->width;
-								m_swsContext_SrcHeight = m_codecContext->height;
-								m_swsContext_SrcPixelFormat = m_codecContext->pix_fmt;
-								m_swsContext_DestWidth = m_codecContext->width;
-								m_swsContext_DestHeight = m_codecContext->height;
-								OM_BLOG(LOG_DEBUG, "sws_getContext(%d, %d, %d)", m_codecContext->width, m_codecContext->height, m_codecContext->pix_fmt);
-							}
-
-							assert(m_swsContext);
-							uint8_t *data[1] = {
-								new uint8_t[m_codecContext->width * m_codecContext->height * 4]
-							};
-							int stride[1] = { (int)m_codecContext->width * 4};
-							sws_scale(
-								m_swsContext,
-								picture->data,
-								picture->linesize,
-								0,
-								picture->height,
-								data, stride);
-
-							obs_enter_graphics();
-							if (m_temp_texture) {
-								gs_texture_destroy(m_temp_texture);
-								m_temp_texture = nullptr;
-							}
-							m_temp_texture = gs_texture_create(
-								m_codecContext->width,
-								m_codecContext->height,
-								GS_RGBA, 1,
-								const_cast<const uint8_t**>(&data[0]),
-								0);
-							obs_leave_graphics();
-
-							delete data[0];
-						}
-					}
-
-					av_frame_free(&picture);
-					av_packet_free(&packet);
-				} else if (frame->m_type == PayloadType::AUDIO_SAMPLERATE) {
-					m_audioSampleRate = *(uint32_t *)(frame->m_payload.data());
-					OM_BLOG(LOG_DEBUG, "[AUDIO_SAMPLERATE] %d", m_audioSampleRate);
-				} else if (frame->m_type == PayloadType::AUDIO_DATA) {
-					m_cachedAudioFrames.push_back(std::make_pair(m_audioFrameIndex, frame));
-					++m_audioFrameIndex;
-#if _DEBUG
-					std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
-					OM_BLOG(LOG_DEBUG, "[%f][AUDIO_DATA] timestamp %llu", timePassed.count());
-#endif
-				} else if (frame->m_type == PayloadType::CAPTURE_CONTROL_DATA) {
-					OM_BLOG(LOG_DEBUG, "[CAPTURE_CONTROL_DATA] Got CAPTURE_CONTROL_DATA");
-				} else if (frame->m_type == PayloadType::DATA_VERSION) {
-					OM_BLOG(LOG_DEBUG, "[DATA_VERSION] Got DATA_VERSION");
+				int ret = avcodec_send_packet(m_codecContext, m_avPacket);
+				if (ret < 0) {
+					OM_BLOG(LOG_ERROR, "avcodec_send_packet error %s", GetAvErrorString(ret).c_str());
 				} else {
-					OM_BLOG(LOG_ERROR, "Unknown payload type: %u", frame->m_type);
+					AVFrame* recievePicture = (m_codecHwPixFmt != AV_PIX_FMT_NONE) ? m_avPictureHw : m_avPicture;
+					ret = avcodec_receive_frame(m_codecContext, recievePicture);
+					if (ret < 0) {
+						OM_BLOG(LOG_ERROR, "avcodec_receive_frame error %s", GetAvErrorString(ret).c_str());
+					} else {
+#if _DEBUG
+						std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
+						OM_BLOG(LOG_DEBUG, "[%f][VIDEO_DATA] size %d width %d height %d format %d",
+							timePassed.count(), packet->size, picture->width, picture->height, picture->format);
+#endif
+						++m_videoFrameIndex;
+
+						AVFrame* usePicture = m_avPicture;
+						if (recievePicture->format == m_codecHwPixFmt) {
+							// retrieve data from GPU to CPU
+							ret = av_hwframe_transfer_data(m_avPicture, m_avPictureHw, 0);
+
+							if (ret != 0) {
+								OM_BLOG(LOG_ERROR, "av_hwframe_transfer_data error %s", GetAvErrorString(ret).c_str());
+								continue;
+							}
+							m_avPicture->color_range = m_avPictureHw->color_range;
+							m_avPicture->color_primaries = m_avPictureHw->color_primaries;
+							m_avPicture->color_trc = m_avPictureHw->color_trc;
+							m_avPicture->colorspace = m_avPictureHw->colorspace;
+						} else {
+							usePicture = recievePicture;
+						}
+
+						if (m_swsContext != nullptr) {
+							if (m_swsContext_SrcWidth != m_codecContext->width ||  m_swsContext_SrcHeight != m_codecContext->height ||
+								m_swsContext_SrcPixelFormat != m_codecContext->pix_fmt ||
+								m_swsContext_DestWidth != m_codecContext->width || m_swsContext_DestHeight !=  m_codecContext->height) {
+
+								OM_BLOG(LOG_DEBUG, "Need recreate m_swsContext");
+								sws_freeContext(m_swsContext);
+								m_swsContext = nullptr;
+								delete[] m_codecScaleData;
+								m_codecScaleData = nullptr;
+							}
+						}
+
+						if (m_swsContext == nullptr) {
+							m_swsContext = sws_getContext(
+								m_codecContext->width, m_codecContext->height,
+								m_codecContext->pix_fmt,
+								m_codecContext->width, m_codecContext->height,
+								AV_PIX_FMT_RGBA,
+								SWS_POINT,
+								nullptr,
+								nullptr,
+								nullptr);
+
+							m_swsContext_SrcWidth = m_codecContext->width;
+							m_swsContext_SrcHeight = m_codecContext->height;
+							m_swsContext_SrcPixelFormat = m_codecContext->pix_fmt;
+							m_swsContext_DestWidth = m_codecContext->width;
+							m_swsContext_DestHeight = m_codecContext->height;
+							OM_BLOG(LOG_DEBUG, "sws_getContext(%d, %d, %d)", m_codecContext->width, m_codecContext->height, m_codecContext->pix_fmt);
+
+							m_codecScaleData = new uint8_t[m_codecContext->width * m_codecContext->height * 4];
+						}
+
+						assert(m_swsContext);
+						uint8_t* data[1] = {
+							m_codecScaleData
+						};
+						int stride[1] = { 
+							(int)m_codecContext->width * 4
+						};
+						sws_scale(m_swsContext, usePicture->data, usePicture->linesize, 0, usePicture->height, data, stride);
+
+						obs_enter_graphics();
+						if (m_temp_texture) {
+							gs_texture_destroy(m_temp_texture);
+							m_temp_texture = nullptr;
+						}
+						m_temp_texture = gs_texture_create(m_codecContext->width, m_codecContext->height, GS_RGBA, 1, const_cast<const uint8_t**>(&data[0]), 0);
+						obs_leave_graphics();
+					}
 				}
+			} else if (frame->m_type == PayloadType::AUDIO_SAMPLERATE) {
+				m_audioSampleRate = *(uint32_t *)(frame->m_payload.data());
+				OM_BLOG(LOG_DEBUG, "[AUDIO_SAMPLERATE] %d", m_audioSampleRate);
+			} else if (frame->m_type == PayloadType::AUDIO_DATA) {
+				m_cachedAudioFrames.push_back(std::make_pair(m_audioFrameIndex, frame));
+				++m_audioFrameIndex;
+#if _DEBUG
+				std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
+				OM_BLOG(LOG_DEBUG, "[%f][AUDIO_DATA] timestamp %llu", timePassed.count());
+#endif
+			} 
+#if _DEBUG
+			else if (frame->m_type == PayloadType::CAPTURE_CONTROL_DATA) {
+				OM_BLOG(LOG_DEBUG, "[CAPTURE_CONTROL_DATA] Got CAPTURE_CONTROL_DATA");
+			} else if (frame->m_type == PayloadType::DATA_VERSION) {
+				OM_BLOG(LOG_DEBUG, "[DATA_VERSION] Got DATA_VERSION");
+			} else {
+				OM_BLOG(LOG_ERROR, "Unknown payload type: %u", frame->m_type);
 			}
+#endif
 		}
+
+		// extra processing of audio frames
+		ProcessAudioFrames();
 	}
 
 	void VideoRenderImpl()
@@ -702,11 +773,14 @@ private:
 
 		freeaddrinfo(result);
 
+		delete[] m_codecScaleData;
+		m_codecScaleData = nullptr;
+
 		m_frameCollection.Reset();
+		m_cachedAudioFrames.clear();
 
 		m_audioFrameIndex = 0;
 		m_videoFrameIndex = 0;
-		m_cachedAudioFrames.clear();
 
 		if (!isSocketInvalid(m_connectSocket)) {
 			StartDecoder();
@@ -770,7 +844,6 @@ bool obs_module_load(void)
 	oculus_mrc_source_info.get_width = &OculusMrcSource::GetWidth;
 	oculus_mrc_source_info.get_height = &OculusMrcSource::GetHeight;
 	oculus_mrc_source_info.video_tick = &OculusMrcSource::VideoTick;
-	// TODO: oculus_mrc_source_info.audio_render
 	oculus_mrc_source_info.video_render = &OculusMrcSource::VideoRender;
 	oculus_mrc_source_info.get_properties = &OculusMrcSource::GetProperties;
 

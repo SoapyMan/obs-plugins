@@ -35,6 +35,8 @@ void FrameCollection::Reset()
 	m_scratchPad.clear();
 	m_frames.clear();
 	m_firstFrameTimeSet = false;
+
+	m_scratchPad.reserve(64 * 1024);
 }
 
 void FrameCollection::AddData(const uint8_t *data, uint32_t len)
@@ -51,7 +53,7 @@ void FrameCollection::AddData(const uint8_t *data, uint32_t len)
 	m_scratchPad.insert(m_scratchPad.end(), data, data + len);
 
 	while (m_scratchPad.size() >= sizeof(ovrmPayloadHeader)) {
-		const ovrmPayloadHeader *frameHeader = (const ovrmPayloadHeader *)m_scratchPad.data();
+		const ovrmPayloadHeader* frameHeader = (const ovrmPayloadHeader *)m_scratchPad.data();
 		if (frameHeader->Magic != ovrmConstants::Magic) {
 			OM_LOG(LOG_ERROR, "Frame magic mismatch: expected 0x%08x get 0x%08x", ovrmConstants::Magic, frameHeader->Magic);
 			m_hasError = true;

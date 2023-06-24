@@ -56,6 +56,17 @@ struct Frame {
 	std::vector<uint8_t> m_payload;
 };
 
+struct AudioDataHeader {
+	uint64_t timestamp;
+	int channels;
+	int dataLength;
+};
+
+struct FrameDimension {
+	int w;
+	int h;
+};
+
 //typedef std::vector<uint8_t> Frame;
 
 class FrameCollection {
