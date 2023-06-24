@@ -18,10 +18,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <obs-module.h>
 #include <obs-source.h>
 
-#include <fcntl.h>  
-#include <sys/types.h>  
-#include <sys/stat.h>  
-#include <io.h>  
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <io.h>
 #include <stdio.h>
 #include <stdint.h>
 
@@ -35,7 +35,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #pragma comment(lib, "Ws2_32.lib")
 
 #pragma warning(push)
-#pragma warning(disable:4244)
+#pragma warning(disable : 4244)
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -50,44 +50,45 @@ extern "C" {
 #include "frame.h"
 #include "log.h"
 
-#define OM_DEFAULT_WIDTH (1920*2)
+#define OM_DEFAULT_WIDTH (1920 * 2)
 #define OM_DEFAULT_HEIGHT 1080
 #define OM_DEFAULT_AUDIO_SAMPLERATE 48000
 #define OM_DEFAULT_IP_ADDRESS "192.168.0.1"
 #define OM_DEFAULT_PORT 28734
 #define OM_DEFAULT_USEADB false
 
-
-std::string GetAvErrorString(int errNum)
+static std::string GetAvErrorString(int errNum)
 {
 	char buf[1024];
-	std::string result = av_make_error_string(buf, 1024, errNum);
-	return result;
+	return av_make_error_string(buf, 1024, errNum);
 }
 
-class OculusMrcSource
-{
+class OculusMrcSource {
 public:
 	// OBS source interfaces
 
-	static const char* GetName(void*)
+	static const char *GetName(void *)
 	{
 		return obs_module_text("OculusMrcSource");
 	}
 
 	std::string GetAdbPath()
 	{
-		char* appdatap = std::getenv("APPDATA");
+		char *appdatap = std::getenv("APPDATA");
 		std::filesystem::path sqpath(appdatap);
 		sqpath /= "SideQuest/platform-tools/";
-		if (std::filesystem::is_directory(sqpath)) return sqpath.string().c_str();
-		else return "";
+		if (std::filesystem::is_directory(sqpath)) {
+			return sqpath.string().c_str();
+		} else {
+			return "";
+		}
 	}
 
-	static void DisplayMessage(LPCWSTR message, LPCWSTR title, unsigned long flags)
+	static void DisplayMessage(LPCWSTR message, LPCWSTR title,
+				   unsigned long flags)
 	{
-		auto asyncmsg = [](LPCWSTR message_p, LPCWSTR title_p, unsigned long flags_p)
-		{
+		auto asyncmsg = [](LPCWSTR message_p, LPCWSTR title_p,
+				   unsigned long flags_p) {
 			MessageBox(NULL, message_p, title_p, flags_p);
 		};
 		flags |= MB_SYSTEMMODAL;
@@ -97,7 +98,7 @@ public:
 
 	static void Update(void *data, obs_data_t *settings)
 	{
-		OculusMrcSource *context = (OculusMrcSource*)data;
+		OculusMrcSource *context = (OculusMrcSource *)data;
 		context->Update(settings);
 	}
 
@@ -108,40 +109,49 @@ public:
 		return context;
 	}
 
-	static void Destroy(void *data)
-	{
-		delete (OculusMrcSource*)data;
-	}
+	static void Destroy(void *data) { delete (OculusMrcSource *)data; }
 
 	static obs_properties_t *GetProperties(void *source)
 	{
-		OculusMrcSource* context = (OculusMrcSource*)source;
+		OculusMrcSource *context = (OculusMrcSource *)source;
 
 		obs_properties_t *props = obs_properties_create();
 
-		obs_properties_add_text(props, "ipaddr", obs_module_text("Quest IP Address"), OBS_TEXT_DEFAULT);
+		obs_properties_add_text(props, "ipaddr",
+					obs_module_text("Quest IP Address"),
+					OBS_TEXT_DEFAULT);
 
-		//obs_properties_add_bool(props, "scan_sockets", obs_module_text("Automatically scan for devices"));
+		obs_properties_add_int(props, "port", obs_module_text("Port"),
+				       1025, 65535, 1);
 
-		obs_properties_add_bool(props, "use_adb", obs_module_text("(Beta) Stream over USB"));
+		obs_properties_add_bool(
+			props, "use_adb",
+			obs_module_text("Stream over USB (ADB required)"));
 
-		obs_property_t* info_sound = obs_properties_add_button(props, "info_sound", obs_module_text("Sound not working correctly? Follow these steps."), nullptr);
-		obs_property_button_set_type(info_sound, OBS_BUTTON_URL);
-		obs_property_button_set_url(info_sound, "https://github.com/Raemien/MRCPlus/wiki/OBS-Audio-Fix");
+		obs_property_t *connectButton = obs_properties_add_button(
+			props, "connect",
+			obs_module_text(
+				"Connect to MRC-enabled game running on Quest"),
+			[](obs_properties_t *props, obs_property_t *property,
+			   void *data) {
+				return ((OculusMrcSource *)data)
+					->ConnectClicked(props, property);
+			});
+		obs_property_set_enabled(connectButton,
+					 context->m_connectSocket ==
+						 INVALID_SOCKET);
 
-		obs_property_t* connectButton = obs_properties_add_button(props, "connect",
-			obs_module_text("Connect to MRCPlus/Quest MRC"), [](obs_properties_t *props,
-				obs_property_t *property, void *data) {
-			return ((OculusMrcSource *)data)->ConnectClicked(props, property);
-		});
-		obs_property_set_enabled(connectButton, context->m_connectSocket == INVALID_SOCKET);
-
-		obs_property_t* disconnectButton = obs_properties_add_button(props, "disconnect",
-			obs_module_text("Disconnect"), [](obs_properties_t *props,
-				obs_property_t *property, void *data) {
-			return ((OculusMrcSource *)data)->DisconnectClicked(props, property);
-		});
-		obs_property_set_enabled(disconnectButton, context->m_connectSocket != INVALID_SOCKET);
+		obs_property_t *disconnectButton = obs_properties_add_button(
+			props, "disconnect",
+			obs_module_text("Disconnect from Quest game"),
+			[](obs_properties_t *props, obs_property_t *property,
+			   void *data) {
+				return ((OculusMrcSource *)data)
+					->DisconnectClicked(props, property);
+			});
+		obs_property_set_enabled(disconnectButton,
+					 context->m_connectSocket !=
+						 INVALID_SOCKET);
 
 		return props;
 	}
@@ -174,9 +184,11 @@ public:
 	{
 		obs_data_set_default_int(settings, "width", OM_DEFAULT_WIDTH);
 		obs_data_set_default_int(settings, "height", OM_DEFAULT_HEIGHT);
-		obs_data_set_default_string(settings, "ipaddr", OM_DEFAULT_IP_ADDRESS);
+		obs_data_set_default_string(settings, "ipaddr",
+					    OM_DEFAULT_IP_ADDRESS);
 		obs_data_set_default_int(settings, "port", OM_DEFAULT_PORT);
-		obs_data_set_default_bool(settings, "use_adb", OM_DEFAULT_USEADB);
+		obs_data_set_default_bool(settings, "use_adb",
+					  OM_DEFAULT_USEADB);
 	}
 
 	void VideoTick(float /*seconds*/)
@@ -185,20 +197,26 @@ public:
 		VideoTickImpl();
 	}
 
-	void VideoRender(gs_effect_t* /*effect*/)
+	void VideoRender(gs_effect_t * /*effect*/)
 	{
 		//std::lock_guard<std::mutex> lock(m_updateMutex);
 		VideoRenderImpl();
 	}
 
-	void RefreshButtons(obs_properties_t* props)
+	void RefreshButtons(obs_properties_t *props)
 	{
-		obs_property_set_enabled(obs_properties_get(props, "connect"), m_connectSocket == INVALID_SOCKET);
-		obs_property_set_enabled(obs_properties_get(props, "use_adb"), m_connectSocket == INVALID_SOCKET);
-		obs_property_set_enabled(obs_properties_get(props, "disconnect"), m_connectSocket != INVALID_SOCKET);
+		obs_property_set_enabled(obs_properties_get(props, "connect"),
+					 m_connectSocket == INVALID_SOCKET);
+		obs_property_set_enabled(obs_properties_get(props, "use_adb"),
+					 m_connectSocket == INVALID_SOCKET);
+		obs_property_set_enabled(obs_properties_get(props,
+							    "disconnect"),
+					 m_connectSocket != INVALID_SOCKET);
 	}
 
-	bool ConnectClicked(obs_properties_t* props, obs_property_t* /*property*/) {
+	bool ConnectClicked(obs_properties_t *props,
+			    obs_property_t * /*property*/)
+	{
 		OM_BLOG(LOG_INFO, "ConnectClicked");
 
 		std::lock_guard<std::mutex> lock(m_updateMutex);
@@ -208,7 +226,9 @@ public:
 		return true;
 	}
 
-	bool DisconnectClicked(obs_properties_t* props, obs_property_t* /*property*/) {
+	bool DisconnectClicked(obs_properties_t *props,
+			       obs_property_t * /*property*/)
+	{
 		OM_BLOG(LOG_INFO, "DisconnectClicked");
 
 		std::lock_guard<std::mutex> lock(m_updateMutex);
@@ -219,31 +239,28 @@ public:
 	}
 
 private:
-	OculusMrcSource(obs_source_t* source) :
-		m_src(source)
+	OculusMrcSource(obs_source_t *source) : m_src(source)
 	{
 		m_codec = avcodec_find_decoder(AV_CODEC_ID_H264);
-		if (!m_codec)
-		{
+		if (!m_codec) {
 			OM_BLOG(LOG_ERROR, "Unable to find decoder");
-		}
-		else
-		{
-			OM_BLOG(LOG_INFO, "Codec found. Capabilities 0x%x", m_codec->capabilities);
+		} else {
+			OM_BLOG(LOG_INFO, "Codec found. Capabilities 0x%x",
+				m_codec->capabilities);
 		}
 
 		std::string adb_cmd = GetAdbPath() + "adb version";
 		int adb_installed = system(adb_cmd.c_str());
 
-		if (adb_installed == 1)
-		{
-			DisplayMessage(TEXT("ADB is missing from your system's PATH.\n\nIs SideQuest installed?"), TEXT("ADB not installed!"), MB_OK);
+		if (adb_installed == 1) {
+			DisplayMessage(
+				TEXT("ADB is missing from your system's PATH."),
+				TEXT("ADB not installed!"), MB_OK);
 		}
 
 		obs_enter_graphics();
 		char *filename = obs_module_file("oculusmrc.effect");
-		m_mrc_effect = gs_effect_create_from_file(filename,
-			NULL);
+		m_mrc_effect = gs_effect_create_from_file(filename, NULL);
 		bfree(filename);
 		assert(m_mrc_effect);
 		obs_leave_graphics();
@@ -253,18 +270,15 @@ private:
 	{
 		StopDecoder();
 		obs_enter_graphics();
-		if (m_mrc_effect)
-		{
+		if (m_mrc_effect) {
 			gs_effect_destroy(m_mrc_effect);
 			m_mrc_effect = nullptr;
 		}
-		if (m_temp_texture)
-		{
+		if (m_temp_texture) {
 			gs_texture_destroy(m_temp_texture);
 			m_temp_texture = nullptr;
 		}
-		if (m_swsContext)
-		{
+		if (m_swsContext) {
 			sws_freeContext(m_swsContext);
 			m_swsContext = nullptr;
 		}
@@ -273,30 +287,26 @@ private:
 
 	void StartDecoder()
 	{
-		if (m_codecContext != nullptr)
-		{
+		if (m_codecContext != nullptr) {
 			OM_BLOG(LOG_ERROR, "Decoder already started");
 			return;
 		}
 
-		if (!m_codec)
-		{
+		if (!m_codec) {
 			OM_BLOG(LOG_ERROR, "m_codec not initalized");
 			return;
 		}
 
 		m_codecContext = avcodec_alloc_context3(m_codec);
-		if (!m_codecContext)
-		{
+		if (!m_codecContext) {
 			OM_BLOG(LOG_ERROR, "Unable to create codec context");
 			return;
 		}
 
-		AVDictionary* dict = nullptr;
+		AVDictionary *dict = nullptr;
 		int ret = avcodec_open2(m_codecContext, m_codec, &dict);
 		av_dict_free(&dict);
-		if (ret < 0)
-		{
+		if (ret < 0) {
 			OM_BLOG(LOG_ERROR, "Unable to open codec context");
 			avcodec_free_context(&m_codecContext);
 			return;
@@ -307,15 +317,13 @@ private:
 
 	void StopDecoder()
 	{
-		if (m_codecContext)
-		{
+		if (m_codecContext) {
 			avcodec_close(m_codecContext);
 			avcodec_free_context(&m_codecContext);
 			OM_BLOG(LOG_INFO, "m_codecContext freed");
 		}
 
-		if (m_temp_texture)
-		{
+		if (m_temp_texture) {
 			obs_enter_graphics();
 			gs_texture_destroy(m_temp_texture);
 			obs_leave_graphics();
@@ -334,16 +342,16 @@ private:
 	std::mutex m_updateMutex;
 
 	obs_source_t *m_src = nullptr;
-	gs_texture_t * m_temp_texture = nullptr;
-	gs_effect_t* m_mrc_effect = nullptr;
+	gs_texture_t *m_temp_texture = nullptr;
+	gs_effect_t *m_mrc_effect = nullptr;
 
-	const AVCodec* m_codec = nullptr;
-	AVCodecContext* m_codecContext = nullptr;
+	const AVCodec *m_codec = nullptr;
+	AVCodecContext *m_codecContext = nullptr;
 
 	SOCKET m_connectSocket = INVALID_SOCKET;
 	FrameCollection m_frameCollection;
 
-	SwsContext* m_swsContext = nullptr;
+	SwsContext *m_swsContext = nullptr;
 	int m_swsContext_SrcWidth = 0;
 	int m_swsContext_SrcHeight = 0;
 	AVPixelFormat m_swsContext_SrcPixelFormat = AV_PIX_FMT_NONE;
@@ -354,60 +362,52 @@ private:
 	int m_audioFrameIndex = 0;
 	int m_videoFrameIndex = 0;
 
-	void Update(obs_data_t* settings)
+	void Update(obs_data_t *settings)
 	{
 		m_usbMode = obs_data_get_bool(settings, "use_adb");
 		m_width = (uint32_t)obs_data_get_int(settings, "width");
 		m_height = (uint32_t)obs_data_get_int(settings, "height");
-		m_ipaddr = m_usbMode ? "127.0.0.1" : obs_data_get_string(settings, "ipaddr");
+		m_ipaddr = m_usbMode ? "127.0.0.1"
+				     : obs_data_get_string(settings, "ipaddr");
 		m_port = (uint32_t)obs_data_get_int(settings, "port");
 	}
 
-	uint32_t GetWidth()
-	{
-		return m_width;
-	}
+	uint32_t GetWidth() { return m_width; }
 
-	uint32_t GetHeight()
-	{
-		return m_height;
-	}
+	uint32_t GetHeight() { return m_height; }
 
 	void ReceiveData()
 	{
-		if (m_connectSocket != INVALID_SOCKET)
-		{
-			for (;;)
-			{
-				fd_set socketSet = { 0 };
+		if (m_connectSocket != INVALID_SOCKET) {
+			for (;;) {
+				fd_set socketSet = {0};
 				FD_ZERO(&socketSet);
 				FD_SET(m_connectSocket, &socketSet);
 
-				timeval t = { 0, 0 };
-				int num = select(0, &socketSet, nullptr, nullptr, &t);
-				if (num >= 1)
-				{
+				timeval t = {0, 0};
+				int num = select(0, &socketSet, nullptr,
+						 nullptr, &t);
+				if (num >= 1) {
 					const int bufferSize = 65536;
 					uint8_t buf[bufferSize];
-					int iResult = recv(m_connectSocket, (char*)buf, bufferSize, 0);
-					if (iResult < 0)
-					{
-						OM_BLOG(LOG_ERROR, "recv error %d, closing socket", iResult);
+					int iResult = recv(m_connectSocket,
+							   (char *)buf,
+							   bufferSize, 0);
+					if (iResult < 0) {
+						OM_BLOG(LOG_ERROR,
+							"recv error %d, closing socket",
+							iResult);
 						Disconnect();
-					}
-					else if (iResult == 0)
-					{
-						OM_BLOG(LOG_INFO, "recv 0 bytes, closing socket");
+					} else if (iResult == 0) {
+						OM_BLOG(LOG_INFO,
+							"recv 0 bytes, closing socket");
 						Disconnect();
-					}
-					else
-					{
+					} else {
 						//OM_BLOG(LOG_INFO, "recv: %d bytes received", iResult);
-						m_frameCollection.AddData(buf, iResult);
+						m_frameCollection.AddData(
+							buf, iResult);
 					}
-				}
-				else
-				{
+				} else {
 					break;
 				}
 			}
@@ -416,16 +416,15 @@ private:
 
 	void VideoTickImpl()
 	{
-		if (m_connectSocket != INVALID_SOCKET)
-		{
+		if (m_connectSocket != INVALID_SOCKET) {
 			ReceiveData();
 
-			if (m_connectSocket == INVALID_SOCKET)	// socket disconnected
+			if (m_connectSocket ==
+			    INVALID_SOCKET) // socket disconnected
 				return;
 
 			//std::chrono::time_point<std::chrono::system_clock> startTime = std::chrono::system_clock::now();
-			while (m_frameCollection.HasCompletedFrame())
-			{
+			while (m_frameCollection.HasCompletedFrame()) {
 				//std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - startTime;
 				//if (timePassed.count() > 0.05)
 				//	break;
@@ -436,50 +435,78 @@ private:
 				//auto seconds_since_epoch = std::chrono::duration<double>(current_time.time_since_epoch()).count();
 				//double latency = seconds_since_epoch - frame->m_secondsSinceEpoch;
 
-				if (frame->m_type == Frame::PayloadType::VIDEO_DIMENSION)
-				{
-					struct FrameDimension
-					{
+				if (frame->m_type ==
+				    PayloadType::VIDEO_DIMENSION) {
+					struct FrameDimension {
 						int w;
 						int h;
 					};
-					const FrameDimension* dim = (const FrameDimension*)frame->m_payload.data();
+					const FrameDimension *dim =
+						(const FrameDimension *)
+							frame->m_payload.data();
 					m_width = dim->w;
 					m_height = dim->h;
 
-					OM_BLOG(LOG_INFO, "[VIDEO_DIMENSION] width %d height %d", m_width, m_height);
-				}
-				else if (frame->m_type == Frame::PayloadType::VIDEO_DATA)
-				{
-					AVPacket* packet = av_packet_alloc();
-					AVFrame* picture = av_frame_alloc();
+					OM_BLOG(LOG_INFO,
+						"[VIDEO_DIMENSION] width %d height %d",
+						m_width, m_height);
+				} else if (frame->m_type ==
+					   PayloadType::VIDEO_DATA) {
+					AVPacket *packet = av_packet_alloc();
+					AVFrame *picture = av_frame_alloc();
 
-					av_new_packet(packet, (int)frame->m_payload.size());
+					av_new_packet(
+						packet,
+						(int)frame->m_payload.size());
 					assert(packet->data);
-					memcpy(packet->data, frame->m_payload.data(), frame->m_payload.size());
+					memcpy(packet->data,
+					       frame->m_payload.data(),
+					       frame->m_payload.size());
 
-					int ret = avcodec_send_packet(m_codecContext, packet);
-					if (ret < 0)
-					{
-						OM_BLOG(LOG_ERROR, "avcodec_send_packet error %s", GetAvErrorString(ret).c_str());
-					}
-					else
-					{
-						ret = avcodec_receive_frame(m_codecContext, picture);
-						if (ret < 0)
-						{
-							OM_BLOG(LOG_ERROR, "avcodec_receive_frame error %s", GetAvErrorString(ret).c_str());
-						}
-						else
-						{
+					int ret = avcodec_send_packet(
+						m_codecContext, packet);
+					if (ret < 0) {
+						OM_BLOG(LOG_ERROR,
+							"avcodec_send_packet error %s",
+							GetAvErrorString(ret)
+								.c_str());
+					} else {
+						ret = avcodec_receive_frame(
+							m_codecContext,
+							picture);
+						if (ret < 0) {
+							OM_BLOG(LOG_ERROR,
+								"avcodec_receive_frame error %s",
+								GetAvErrorString(
+									ret)
+									.c_str());
+						} else {
 #if _DEBUG
-							std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
-							OM_BLOG(LOG_DEBUG, "[%f][VIDEO_DATA] size %d width %d height %d format %d", timePassed.count(), packet->size, picture->width, picture->height, picture->format);
+							std::chrono::duration<double> timePassed =
+								std::chrono::system_clock::
+									now() -
+								m_frameCollection
+									.GetFirstFrameTime();
+							OM_BLOG(LOG_DEBUG,
+								"[%f][VIDEO_DATA] size %d width %d height %d format %d",
+								timePassed
+									.count(),
+								packet->size,
+								picture->width,
+								picture->height,
+								picture->format);
 #endif
 
-							while (m_cachedAudioFrames.size() > 0 && m_cachedAudioFrames[0].first <= m_videoFrameIndex)
-							{
-								std::shared_ptr<Frame> audioFrame = m_cachedAudioFrames[0].second;
+							while (m_cachedAudioFrames
+									       .size() >
+								       0 &&
+							       m_cachedAudioFrames[0]
+									       .first <=
+								       m_videoFrameIndex) {
+								std::shared_ptr<Frame> audioFrame =
+									m_cachedAudioFrames
+										[0]
+											.second;
 
 								struct AudioDataHeader {
 									uint64_t timestamp;
@@ -487,84 +514,165 @@ private:
 									int channels;
 									int dataLength;
 								};
-								AudioDataHeader* audioDataHeader = (AudioDataHeader*)(audioFrame->m_payload.data());
+								AudioDataHeader *audioDataHeader =
+									(AudioDataHeader
+										 *)(audioFrame
+											    ->m_payload
+											    .data());
 
-								if (audioDataHeader->channels == 1 || audioDataHeader->channels == 2)
-								{
-									obs_source_audio audio = { 0 };
-									audio.data[0] = (uint8_t*)audioFrame->m_payload.data() + sizeof(AudioDataHeader);
-									audio.frames = audioDataHeader->dataLength / sizeof(float) / audioDataHeader->channels;
-									audio.speakers = audioDataHeader->channels == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO;
-									audio.format = AUDIO_FORMAT_FLOAT;
-									audio.samples_per_sec = m_audioSampleRate;
-									audio.timestamp = audioDataHeader->timestamp;
-									obs_source_output_audio(m_src, &audio);
-								}
-								else
-								{
-									OM_BLOG(LOG_ERROR, "[AUDIO_DATA] unimplemented audio channels %d", audioDataHeader->channels);
+								if (audioDataHeader->channels ==
+									    1 ||
+								    audioDataHeader->channels ==
+									    2) {
+									obs_source_audio audio =
+										{0};
+									audio.data
+										[0] =
+										(uint8_t *)audioFrame
+											->m_payload
+											.data() +
+										sizeof(AudioDataHeader);
+									audio.frames =
+										audioDataHeader
+											->dataLength /
+										sizeof(float) /
+										audioDataHeader
+											->channels;
+									audio.speakers =
+										audioDataHeader->channels ==
+												1
+											? SPEAKERS_MONO
+											: SPEAKERS_STEREO;
+									audio.format =
+										AUDIO_FORMAT_FLOAT;
+									audio.samples_per_sec =
+										m_audioSampleRate;
+									audio.timestamp =
+										audioDataHeader
+											->timestamp;
+									obs_source_output_audio(
+										m_src,
+										&audio);
+								} else {
+									OM_BLOG(LOG_ERROR,
+										"[AUDIO_DATA] unimplemented audio channels %d",
+										audioDataHeader
+											->channels);
 								}
 
-								m_cachedAudioFrames.erase(m_cachedAudioFrames.begin());
+								m_cachedAudioFrames
+									.erase(m_cachedAudioFrames
+										       .begin());
 							}
 
 							++m_videoFrameIndex;
 
-							if (m_swsContext != nullptr)
-							{
-								if (m_swsContext_SrcWidth != m_codecContext->width ||
-									m_swsContext_SrcHeight != m_codecContext->height ||
-									m_swsContext_SrcPixelFormat != m_codecContext->pix_fmt ||
-									m_swsContext_DestWidth != m_codecContext->width ||
-									m_swsContext_DestHeight != m_codecContext->height)
-								{
-									OM_BLOG(LOG_DEBUG, "Need recreate m_swsContext");
-									sws_freeContext(m_swsContext);
-									m_swsContext = nullptr;
+							if (m_swsContext !=
+							    nullptr) {
+								if (m_swsContext_SrcWidth !=
+									    m_codecContext
+										    ->width ||
+								    m_swsContext_SrcHeight !=
+									    m_codecContext
+										    ->height ||
+								    m_swsContext_SrcPixelFormat !=
+									    m_codecContext
+										    ->pix_fmt ||
+								    m_swsContext_DestWidth !=
+									    m_codecContext
+										    ->width ||
+								    m_swsContext_DestHeight !=
+									    m_codecContext
+										    ->height) {
+									OM_BLOG(LOG_DEBUG,
+										"Need recreate m_swsContext");
+									sws_freeContext(
+										m_swsContext);
+									m_swsContext =
+										nullptr;
 								}
 							}
 
-							if (m_swsContext == nullptr)
-							{
+							if (m_swsContext ==
+							    nullptr) {
 								m_swsContext = sws_getContext(
-									m_codecContext->width,
-									m_codecContext->height,
-									m_codecContext->pix_fmt,
-									m_codecContext->width,
-									m_codecContext->height,
+									m_codecContext
+										->width,
+									m_codecContext
+										->height,
+									m_codecContext
+										->pix_fmt,
+									m_codecContext
+										->width,
+									m_codecContext
+										->height,
 									AV_PIX_FMT_RGBA,
 									SWS_POINT,
-									nullptr, nullptr, nullptr
-								);
-								m_swsContext_SrcWidth = m_codecContext->width;
-								m_swsContext_SrcHeight = m_codecContext->height;
-								m_swsContext_SrcPixelFormat = m_codecContext->pix_fmt;
-								m_swsContext_DestWidth = m_codecContext->width;
-								m_swsContext_DestHeight = m_codecContext->height;
-								OM_BLOG(LOG_DEBUG, "sws_getContext(%d, %d, %d)", m_codecContext->width, m_codecContext->height, m_codecContext->pix_fmt);
+									nullptr,
+									nullptr,
+									nullptr);
+								m_swsContext_SrcWidth =
+									m_codecContext
+										->width;
+								m_swsContext_SrcHeight =
+									m_codecContext
+										->height;
+								m_swsContext_SrcPixelFormat =
+									m_codecContext
+										->pix_fmt;
+								m_swsContext_DestWidth =
+									m_codecContext
+										->width;
+								m_swsContext_DestHeight =
+									m_codecContext
+										->height;
+								OM_BLOG(LOG_DEBUG,
+									"sws_getContext(%d, %d, %d)",
+									m_codecContext
+										->width,
+									m_codecContext
+										->height,
+									m_codecContext
+										->pix_fmt);
 							}
 
 							assert(m_swsContext);
-							uint8_t* data[1] = { new uint8_t[m_codecContext->width * m_codecContext->height * 4] };
-							int stride[1] = { (int)m_codecContext->width * 4 };
-							sws_scale(m_swsContext, picture->data,
+							uint8_t *data[1] = {
+								new uint8_t
+									[m_codecContext
+										 ->width *
+									 m_codecContext
+										 ->height *
+									 4]};
+							int stride[1] = {
+								(int)m_codecContext
+									->width *
+								4};
+							sws_scale(
+								m_swsContext,
+								picture->data,
 								picture->linesize,
 								0,
 								picture->height,
-								data,
-								stride);
+								data, stride);
 
 							obs_enter_graphics();
-							if (m_temp_texture)
-							{
-								gs_texture_destroy(m_temp_texture);
-								m_temp_texture = nullptr;
+							if (m_temp_texture) {
+								gs_texture_destroy(
+									m_temp_texture);
+								m_temp_texture =
+									nullptr;
 							}
-							m_temp_texture = gs_texture_create(m_codecContext->width,
-								m_codecContext->height,
-								GS_RGBA,
-								1,
-								const_cast<const uint8_t**>(&data[0]),
+							m_temp_texture = gs_texture_create(
+								m_codecContext
+									->width,
+								m_codecContext
+									->height,
+								GS_RGBA, 1,
+								const_cast<
+									const uint8_t
+										**>(
+									&data[0]),
 								0);
 							obs_leave_graphics();
 
@@ -574,32 +682,41 @@ private:
 
 					av_frame_free(&picture);
 					av_packet_free(&packet);
-				}
-				else if (frame->m_type == Frame::PayloadType::AUDIO_SAMPLERATE)
-				{
-					m_audioSampleRate = *(uint32_t*)(frame->m_payload.data());
-					OM_BLOG(LOG_DEBUG, "[AUDIO_SAMPLERATE] %d", m_audioSampleRate);
-				}
-				else if (frame->m_type == Frame::PayloadType::AUDIO_DATA)
-				{
-					m_cachedAudioFrames.push_back(std::make_pair(m_audioFrameIndex, frame));
+				} else if (frame->m_type ==
+					   PayloadType::AUDIO_SAMPLERATE) {
+					m_audioSampleRate =
+						*(uint32_t *)(frame->m_payload
+								      .data());
+					OM_BLOG(LOG_DEBUG,
+						"[AUDIO_SAMPLERATE] %d",
+						m_audioSampleRate);
+				} else if (frame->m_type ==
+					   PayloadType::AUDIO_DATA) {
+					m_cachedAudioFrames.push_back(
+						std::make_pair(m_audioFrameIndex,
+							       frame));
 					++m_audioFrameIndex;
 #if _DEBUG
-					std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
-					OM_BLOG(LOG_DEBUG, "[%f][AUDIO_DATA] timestamp %llu", timePassed.count());
+					std::chrono::duration<double> timePassed =
+						std::chrono::system_clock::now() -
+						m_frameCollection
+							.GetFirstFrameTime();
+					OM_BLOG(LOG_DEBUG,
+						"[%f][AUDIO_DATA] timestamp %llu",
+						timePassed.count());
 #endif
-				}
-				else if ( frame->m_type == (Frame::PayloadType)16)
-				{
-					OM_BLOG(LOG_DEBUG, "[PLAYLOAD_16] New Enum has value of %d", *(uint32_t*)(frame->m_payload.data()));
-				}
-				else if ( frame->m_type == (Frame::PayloadType)15)
-				{
-					OM_BLOG(LOG_DEBUG, "[PLAYLOAD_15] New Enum has value of %d", *(uint32_t*)(frame->m_payload.data()));
-				}
-				else
-				{
-					OM_BLOG(LOG_ERROR, "Unknown payload type: %u", frame->m_type);
+				} else if (frame->m_type ==
+					   PayloadType::CAPTURE_CONTROL_DATA) {
+					OM_BLOG(LOG_DEBUG,
+						"[CAPTURE_CONTROL_DATA] Got CAPTURE_CONTROL_DATA");
+				} else if (frame->m_type ==
+					   PayloadType::DATA_VERSION) {
+					OM_BLOG(LOG_DEBUG,
+						"[DATA_VERSION] Got DATA_VERSION");
+				} else {
+					OM_BLOG(LOG_ERROR,
+						"Unknown payload type: %u",
+						frame->m_type);
 				}
 			}
 		}
@@ -608,28 +725,31 @@ private:
 	void VideoRenderImpl()
 	{
 #if _DEBUG
-		if (m_connectSocket != INVALID_SOCKET && m_frameCollection.HasFirstFrame())
-		{
-			std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
-			OM_BLOG(LOG_DEBUG, "[%f] VideoRenderImpl", timePassed.count());
+		if (m_connectSocket != INVALID_SOCKET &&
+		    m_frameCollection.HasFirstFrame()) {
+			std::chrono::duration<double> timePassed =
+				std::chrono::system_clock::now() -
+				m_frameCollection.GetFirstFrameTime();
+			OM_BLOG(LOG_DEBUG, "[%f] VideoRenderImpl",
+				timePassed.count());
 		}
 #endif
 
-		if (m_temp_texture)
-		{
-			gs_technique_t *tech = gs_effect_get_technique(m_mrc_effect, "Frame");
+		if (m_temp_texture) {
+			gs_technique_t *tech =
+				gs_effect_get_technique(m_mrc_effect, "Frame");
 
 			gs_technique_begin(tech);
 			gs_technique_begin_pass(tech, 0);
 
-			obs_source_draw(m_temp_texture, 0, 0, m_width, m_height, true);
+			obs_source_draw(m_temp_texture, 0, 0, m_width, m_height,
+					true);
 
 			gs_technique_end_pass(tech);
 			gs_technique_end(tech);
-		}
-		else
-		{
-			gs_technique_t *tech = gs_effect_get_technique(m_mrc_effect, "Empty");
+		} else {
+			gs_technique_t *tech =
+				gs_effect_get_technique(m_mrc_effect, "Empty");
 
 			gs_technique_begin(tech);
 			gs_technique_begin_pass(tech, 0);
@@ -645,57 +765,60 @@ private:
 	{
 		if (m_usbMode) {
 			m_ipaddr = "127.0.0.1";
-			std::string adb_forwardcmd = string_format("adb forward tcp:%d tcp:%d", m_port, m_port);
+			std::string adb_forwardcmd = string_format(
+				"adb forward tcp:%d tcp:%d", m_port, m_port);
 			std::string adb_cmd = GetAdbPath() + adb_forwardcmd;
 			system(adb_cmd.c_str());
 		}
 
-		if (m_connectSocket != INVALID_SOCKET)
-		{
+		if (m_connectSocket != INVALID_SOCKET) {
 			OM_BLOG(LOG_ERROR, "Already connected");
 			return;
 		}
 
 		struct addrinfo *result = NULL;
 		struct addrinfo *ptr = NULL;
-		struct addrinfo hints = { 0 };
+		struct addrinfo hints = {0};
 
 		hints.ai_family = AF_UNSPEC;
 		hints.ai_socktype = SOCK_STREAM;
 		hints.ai_protocol = IPPROTO_TCP;
 
 		int iResult;
-		iResult = getaddrinfo(m_ipaddr.c_str(), std::to_string(m_port).c_str(), &hints, &result);
-		if (iResult != 0)
-		{
+		iResult = getaddrinfo(m_ipaddr.c_str(),
+				      std::to_string(m_port).c_str(), &hints,
+				      &result);
+		if (iResult != 0) {
 			OM_BLOG(LOG_ERROR, "getaddrinfo failed: %d", iResult);
-			DisplayMessage(TEXT("The IP address you provided is not valid.\n\nPlease check that your Quest IP Address matches what is shown in BMBF."), TEXT("Invalid IP address!"), MB_OK);
+			DisplayMessage(
+				TEXT("The IP address you provided is not valid.\n\nPlease check that your Quest IP Address matches what is shown in BMBF."),
+				TEXT("Invalid IP address!"), MB_OK);
 			return;
 		}
 
 		ptr = result;
-		m_connectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
-		if (m_connectSocket == INVALID_SOCKET)
-		{
-			OM_BLOG(LOG_ERROR, "Error at socket(): %d", WSAGetLastError());
+		m_connectSocket = socket(ptr->ai_family, ptr->ai_socktype,
+					 ptr->ai_protocol);
+		if (m_connectSocket == INVALID_SOCKET) {
+			OM_BLOG(LOG_ERROR, "Error at socket(): %d",
+				WSAGetLastError());
 			freeaddrinfo(result);
 		}
 
-		if (m_connectSocket != INVALID_SOCKET)
-		{
+		if (m_connectSocket != INVALID_SOCKET) {
 			// put socked in non-blocking mode...
 			u_long block = 1;
-			if (ioctlsocket(m_connectSocket, FIONBIO, &block) == SOCKET_ERROR)
-			{
-				OM_BLOG(LOG_ERROR, "Unable to put socket to unblocked mode");
+			if (ioctlsocket(m_connectSocket, FIONBIO, &block) ==
+			    SOCKET_ERROR) {
+				OM_BLOG(LOG_ERROR,
+					"Unable to put socket to unblocked mode");
 			}
 
-			iResult = connect(m_connectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
+			iResult = connect(m_connectSocket, ptr->ai_addr,
+					  (int)ptr->ai_addrlen);
 			bool hasError = true;
-			if (iResult == SOCKET_ERROR)
-			{
-				if (WSAGetLastError() == WSAEWOULDBLOCK)
-				{
+			if (iResult == SOCKET_ERROR) {
+				if (WSAGetLastError() == WSAEWOULDBLOCK) {
 					fd_set setW, setE;
 
 					FD_ZERO(&setW);
@@ -703,33 +826,41 @@ private:
 					FD_ZERO(&setE);
 					FD_SET(m_connectSocket, &setE);
 
-					timeval time_out = { 0 };
+					timeval time_out = {0};
 					time_out.tv_sec = 2;
 					time_out.tv_usec = 0;
 
-					int ret = select(0, NULL, &setW, &setE, &time_out);
-					if (ret > 0 && !FD_ISSET(m_connectSocket, &setE))
-					{
+					int ret = select(0, NULL, &setW, &setE,
+							 &time_out);
+					if (ret > 0 &&
+					    !FD_ISSET(m_connectSocket, &setE)) {
 						hasError = false;
 					}
 				}
 			}
-			if (hasError)
-			{
+			if (hasError) {
 				OM_BLOG(LOG_ERROR, "Unable to connect");
 
-				if (m_usbMode) DisplayMessage(TEXT("Check that your Quest is plugged in and MRCPlus is installed.\n\nNote: SideQuest must be installed to connect via USB."), TEXT("USB connection failed"), MB_OK);
-				else DisplayMessage(TEXT("Please ensure the Quest IP Address is correct and MRCPlus is enabled.\n\nReboot the headset and re-launch the game if the issue remains."), TEXT("Connection failed"), MB_OK);
+				if (m_usbMode)
+					DisplayMessage(
+						TEXT("Check that your Quest is plugged in.\n\nNote: ADB must be installed to connect via USB."),
+						TEXT("USB connection failed"),
+						MB_OK);
+				else
+					DisplayMessage(
+						TEXT("Please ensure the Quest IP Address is correct.\n\nReboot the headset and re-launch the game if the issue remains."),
+						TEXT("Connection failed"),
+						MB_OK);
 				closesocket(m_connectSocket);
 				m_connectSocket = INVALID_SOCKET;
-			}
-			else
-			{
-				OM_BLOG(LOG_INFO, "Socket connected to %s:%d", m_ipaddr.c_str(), m_port);
+			} else {
+				OM_BLOG(LOG_INFO, "Socket connected to %s:%d",
+					m_ipaddr.c_str(), m_port);
 				block = 0;
-				if (ioctlsocket(m_connectSocket, FIONBIO, &block) == SOCKET_ERROR)
-				{
-					OM_BLOG(LOG_ERROR, "Unable to put socket to blocked mode");
+				if (ioctlsocket(m_connectSocket, FIONBIO,
+						&block) == SOCKET_ERROR) {
+					OM_BLOG(LOG_ERROR,
+						"Unable to put socket to blocked mode");
 				}
 			}
 		}
@@ -742,22 +873,21 @@ private:
 		m_videoFrameIndex = 0;
 		m_cachedAudioFrames.clear();
 
-		if (m_connectSocket != INVALID_SOCKET)
-		{
+		if (m_connectSocket != INVALID_SOCKET) {
 			StartDecoder();
 		}
 	}
 
 	void Disconnect()
 	{
-		if (m_connectSocket == INVALID_SOCKET)
-		{
+		if (m_connectSocket == INVALID_SOCKET) {
 			OM_BLOG(LOG_ERROR, "Not connected");
 			return;
 		}
 
 		if (m_usbMode) {
-			std::string adb_forwardcmd = string_format("adb forward --remove tcp:%d", m_port);
+			std::string adb_forwardcmd = string_format(
+				"adb forward --remove tcp:%d", m_port);
 			std::string adb_cmd = GetAdbPath() + adb_forwardcmd;
 			system(adb_cmd.c_str());
 		}
@@ -765,14 +895,13 @@ private:
 		StopDecoder();
 
 		int ret = closesocket(m_connectSocket);
-		if (ret == INVALID_SOCKET)
-		{
-			OM_BLOG(LOG_ERROR, "closesocket error %d", WSAGetLastError());
+		if (ret == INVALID_SOCKET) {
+			OM_BLOG(LOG_ERROR, "closesocket error %d",
+				WSAGetLastError());
 		}
 		m_connectSocket = INVALID_SOCKET;
 		OM_BLOG(LOG_INFO, "Socket disconnected");
 	}
-
 };
 
 OBS_DECLARE_MODULE()
@@ -787,17 +916,19 @@ bool obs_module_load(void)
 	// avcodec_register_all();
 
 	// Initialize Winsock
-	WSADATA wsaData = { 0 };
+	WSADATA wsaData = {0};
 	int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
 	if (iResult != 0) {
 		OM_LOG(LOG_ERROR, "WSAStartup failed: %d\n", iResult);
 		return false;
 	}
 
-	struct obs_source_info oculus_mrc_source_info = { 0 };
+	struct obs_source_info oculus_mrc_source_info = {0};
 	oculus_mrc_source_info.id = "oculus_mrc_source";
 	oculus_mrc_source_info.type = OBS_SOURCE_TYPE_INPUT;
-	oculus_mrc_source_info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO/* | OBS_SOURCE_CUSTOM_DRAW*/;
+	oculus_mrc_source_info.output_flags =
+		OBS_SOURCE_VIDEO |
+		OBS_SOURCE_AUDIO /* | OBS_SOURCE_CUSTOM_DRAW*/;
 	oculus_mrc_source_info.create = &OculusMrcSource::Create;
 	oculus_mrc_source_info.destroy = &OculusMrcSource::Destroy;
 	oculus_mrc_source_info.update = &OculusMrcSource::Update;

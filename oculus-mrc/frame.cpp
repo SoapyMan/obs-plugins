@@ -18,15 +18,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "frame.h"
 #include "log.h"
 
-FrameCollection::FrameCollection()
-	: m_hasError(false)
+FrameCollection::FrameCollection() : m_hasError(false)
 {
 	m_scratchPad.reserve(16 * 1024 * 1024);
 }
 
-FrameCollection::~FrameCollection()
-{
-}
+FrameCollection::~FrameCollection() {}
 
 void FrameCollection::Reset()
 {
@@ -38,12 +35,11 @@ void FrameCollection::Reset()
 	m_firstFrameTimeSet = false;
 }
 
-void FrameCollection::AddData(const uint8_t* data, uint32_t len)
+void FrameCollection::AddData(const uint8_t *data, uint32_t len)
 {
 	std::lock_guard<std::mutex> lock(m_frameMutex);
 
-	if (m_hasError)
-	{
+	if (m_hasError) {
 		return;
 	}
 
@@ -52,61 +48,81 @@ void FrameCollection::AddData(const uint8_t* data, uint32_t len)
 #endif
 	m_scratchPad.insert(m_scratchPad.end(), data, data + len);
 
-	while (m_scratchPad.size() >= sizeof(FrameHeader))
-	{
-		const FrameHeader* frameHeader = (const FrameHeader*)m_scratchPad.data();
-		if (frameHeader->Magic != Magic)
-		{
-			OM_LOG(LOG_ERROR, "Frame magic mismatch: expected 0x%08x get 0x%08x", Magic, frameHeader->Magic);
+	while (m_scratchPad.size() >= sizeof(ovrmPayloadHeader)) {
+		const ovrmPayloadHeader *frameHeader =
+			(const ovrmPayloadHeader *)m_scratchPad.data();
+		if (frameHeader->Magic != ovrmConstants::Magic) {
+			OM_LOG(LOG_ERROR,
+			       "Frame magic mismatch: expected 0x%08x get 0x%08x",
+			       ovrmConstants::Magic, frameHeader->Magic);
 			m_hasError = true;
 			return;
 		}
-		uint32_t frameLengthExcludingMagic = frameHeader->TotalDataLengthExcludingMagic;
-		if (m_scratchPad.size() >= sizeof(uint32_t) + frameLengthExcludingMagic)
-		{
-			if (frameHeader->PayloadLength != frameHeader->TotalDataLengthExcludingMagic + sizeof(uint32_t) - sizeof(FrameHeader))
-			{
-				OM_LOG(LOG_ERROR, "Frame length mismatch: length %u, payload length %u", frameHeader->TotalDataLengthExcludingMagic, frameHeader->PayloadLength);
+		uint32_t frameLengthExcludingMagic =
+			frameHeader->TotalDataLengthExcludingMagic;
+		if (m_scratchPad.size() >=
+		    sizeof(uint32_t) + frameLengthExcludingMagic) {
+			if (frameHeader->PayloadLength !=
+			    frameHeader->TotalDataLengthExcludingMagic +
+				    sizeof(uint32_t) -
+				    sizeof(ovrmPayloadHeader)) {
+				OM_LOG(LOG_ERROR,
+				       "Frame length mismatch: length %u, payload length %u",
+				       frameHeader
+					       ->TotalDataLengthExcludingMagic,
+				       frameHeader->PayloadLength);
 				m_hasError = true;
 				return;
 			}
 
-			std::shared_ptr<Frame> frame = std::make_shared<Frame>();
-			frame->m_type = (Frame::PayloadType)frameHeader->PayloadType;
+			std::shared_ptr<Frame> frame =
+				std::make_shared<Frame>();
+			frame->m_type = (PayloadType)frameHeader->PayloadType;
 			//frame->m_secondsSinceEpoch = frameHeader->SecondsSinceEpoch;
-			auto first = m_scratchPad.begin() + sizeof(FrameHeader);
+			auto first = m_scratchPad.begin() +
+				     sizeof(ovrmPayloadHeader);
 			auto last = first + frameHeader->PayloadLength;
 
-			if (m_scratchPad.size() >= sizeof(uint32_t) + frameHeader->TotalDataLengthExcludingMagic + sizeof(uint32_t))
-			{
-				uint32_t* magic = (uint32_t*)&m_scratchPad.at(sizeof(uint32_t) + frameHeader->TotalDataLengthExcludingMagic);
-				if (*magic != Magic)
-				{
-					OM_LOG(LOG_ERROR, "Will have magic number error in next frame: current frame type %d, frame length %d, scratchPad size %d",
-						frame->m_type,
-						sizeof(uint32_t) + frameHeader->TotalDataLengthExcludingMagic,
-						m_scratchPad.size());
+			if (m_scratchPad.size() >=
+			    sizeof(uint32_t) +
+				    frameHeader->TotalDataLengthExcludingMagic +
+				    sizeof(uint32_t)) {
+				uint32_t *magic = (uint32_t *)&m_scratchPad.at(
+					sizeof(uint32_t) +
+					frameHeader
+						->TotalDataLengthExcludingMagic);
+				if (*magic != ovrmConstants::Magic) {
+					OM_LOG(LOG_ERROR,
+					       "Will have magic number error in next frame: current frame type %d, frame length %d, scratchPad size %d",
+					       frame->m_type,
+					       sizeof(uint32_t) +
+						       frameHeader
+							       ->TotalDataLengthExcludingMagic,
+					       m_scratchPad.size());
 				}
 			}
 
 			frame->m_payload.assign(first, last);
 			m_frames.push_back(frame);
 
-			if (!m_firstFrameTimeSet)
-			{
+			if (!m_firstFrameTimeSet) {
 				m_firstFrameTimeSet = true;
-				m_firstFrameTime = std::chrono::system_clock::now();
+				m_firstFrameTime =
+					std::chrono::system_clock::now();
 			}
 #if _DEBUG
-			std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_firstFrameTime;
+			std::chrono::duration<double> timePassed =
+				std::chrono::system_clock::now() -
+				m_firstFrameTime;
 
 			static int frameIndex = 0;
-			OM_LOG(LOG_DEBUG, "[%f] new frame(%d) pushed, type %u, payload %u bytes", timePassed.count(), frameIndex++, frame->m_type, frame->m_payload.size());
+			OM_LOG(LOG_DEBUG,
+			       "[%f] new frame(%d) pushed, type %u, payload %u bytes",
+			       timePassed.count(), frameIndex++, frame->m_type,
+			       frame->m_payload.size());
 #endif
 			m_scratchPad.erase(m_scratchPad.begin(), last);
-		}
-		else
-		{
+		} else {
 			break;
 		}
 	}
@@ -123,14 +139,11 @@ std::shared_ptr<Frame> FrameCollection::PopFrame()
 {
 	std::lock_guard<std::mutex> lock(m_frameMutex);
 
-	if (m_frames.size() > 0)
-	{
+	if (m_frames.size() > 0) {
 		auto result = m_frames.front();
 		m_frames.pop_front();
 		return result;
-	}
-	else
-	{
+	} else {
 		return std::shared_ptr<Frame>(nullptr);
 	}
 }
