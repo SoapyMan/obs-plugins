@@ -17,6 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <obs-module.h>
 #include <obs-source.h>
+#include <util/platform.h>
 
 #include <fcntl.h>
 #include <sys/types.h>
@@ -27,6 +28,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <filesystem>
 #include <string>
+#include <sstream>
 #include <mutex>
 
 #ifdef _WIN32
@@ -62,12 +64,21 @@ extern "C" {
 #include "frame.h"
 #include "log.h"
 
-#define OM_DEFAULT_WIDTH (1920 * 2)
-#define OM_DEFAULT_HEIGHT 1080
-#define OM_DEFAULT_AUDIO_SAMPLERATE 48000
-#define OM_DEFAULT_IP_ADDRESS "192.168.0.1"
-#define OM_DEFAULT_PORT 28734
-#define OM_DEFAULT_USEADB false
+#define TEXT_MODULE_NAME		obs_module_text("OculusMrcSource")
+#define TEXT_CONNECT			obs_module_text("Connect to Quest")
+#define TEXT_DISCONNECT			obs_module_text("Disconnect from Quest")
+#define TEXT_IP_ADDRESS			obs_module_text("Quest IP Address")
+#define TEXT_IP_PORT			obs_module_text("Port")
+#define TEXT_STREAM_OVER_USB	obs_module_text("Stream over USB (ADB required)")
+#define TEXT_HW_DECODE			obs_module_text("Hardware Decode")
+
+#define OM_DEFAULT_IP_ADDRESS		"192.168.0.1"
+#define OM_DEFAULT_PORT				28734
+
+#define OM_DEFAULT_WIDTH			(1920 * 2)
+#define OM_DEFAULT_HEIGHT			1080
+#define OM_DEFAULT_USBMODE			false
+#define OM_DEFAULT_HWDECODE			true
 
 static int closeSocket(SOCKET sock)
 {
@@ -125,19 +136,19 @@ public:
 
 	static const char *GetName(void *)
 	{
-		return obs_module_text("OculusMrcSource");
+		return TEXT_MODULE_NAME;
 	}
 
-	std::string GetAdbPath()
+	static void Show(void* data)
 	{
-		char *appdatap = std::getenv("APPDATA");
-		std::filesystem::path sqpath(appdatap);
-		sqpath /= "SideQuest/platform-tools/";
-		if (std::filesystem::is_directory(sqpath)) {
-			return sqpath.string().c_str();
-		} else {
-			return "";
-		}
+		OculusMrcSource* context = (OculusMrcSource*)data;
+		context->Connect();
+	}
+
+	static void Hide(void* data)
+	{
+		OculusMrcSource* context = (OculusMrcSource*)data;
+		context->Disconnect();
 	}
 
 	static void Update(void *data, obs_data_t *settings)
@@ -153,31 +164,41 @@ public:
 		return context;
 	}
 
-	static void Destroy(void *data) { delete (OculusMrcSource *)data; }
+	static void Destroy(void *data) 
+	{
+		delete (OculusMrcSource *)data;
+	}
 
 	static obs_properties_t *GetProperties(void *source)
 	{
-		OculusMrcSource *context = (OculusMrcSource *)source;
+		OculusMrcSource* context = (OculusMrcSource *)source;
 
-		obs_properties_t *props = obs_properties_create();
+		obs_properties_t* props = obs_properties_create();
 
-		obs_properties_add_text(props, "ipaddr", obs_module_text("Quest IP Address"), OBS_TEXT_DEFAULT);
-		obs_properties_add_int(props, "port", obs_module_text("Port"), 1025, 65535, 1);
-		obs_properties_add_bool(props, "use_adb", obs_module_text("Stream over USB (ADB required)"));
+		const char* activateText = TEXT_CONNECT;
+		if (context->IsConnected()) {
+			activateText = TEXT_DISCONNECT;
+		}
 
-		obs_property_t *connectButton = obs_properties_add_button(props, "connect",
-			obs_module_text("Connect to MRC-enabled game running on Quest"),
-			[](obs_properties_t *props, obs_property_t *property, void *data) {
-				return ((OculusMrcSource *)data)->ConnectClicked(props, property);
+		obs_properties_add_button(props, "activate", activateText, [](obs_properties_t* props, obs_property_t* p, void* data) {
+				OculusMrcSource* context = (OculusMrcSource*)data;
+
+				if (context->IsConnected()) {
+					obs_property_set_description(p, TEXT_CONNECT);
+					context->DisconnectClicked(props);
+				} else {
+					obs_property_set_description(p, TEXT_DISCONNECT);
+					context->ConnectClicked(props);
+				}
+				return true;
 			});
-		obs_property_set_enabled( connectButton, isSocketInvalid(context->m_connectSocket));
 
-		obs_property_t *disconnectButton = obs_properties_add_button(props, "disconnect",
-			obs_module_text("Disconnect from Quest game"),
-			[](obs_properties_t *props, obs_property_t *property, void *data) {
-				return ((OculusMrcSource *)data)->DisconnectClicked(props, property);
-			});
-		obs_property_set_enabled( disconnectButton, !isSocketInvalid(context->m_connectSocket));
+		obs_properties_add_text(props, "ipaddr", TEXT_IP_ADDRESS, OBS_TEXT_DEFAULT);
+		obs_properties_add_int(props, "port", TEXT_IP_PORT, 1025, 65535, 1);
+		obs_properties_add_bool(props, "usb_mode", TEXT_STREAM_OVER_USB);
+		obs_properties_add_bool(props, "hw_decode", TEXT_HW_DECODE);
+
+		context->RefreshButtons(props);
 
 		return props;
 	}
@@ -212,44 +233,56 @@ public:
 		obs_data_set_default_int(settings, "height", OM_DEFAULT_HEIGHT);
 		obs_data_set_default_string(settings, "ipaddr", OM_DEFAULT_IP_ADDRESS);
 		obs_data_set_default_int(settings, "port", OM_DEFAULT_PORT);
-		obs_data_set_default_bool(settings, "use_adb", OM_DEFAULT_USEADB);
+		obs_data_set_default_bool(settings, "usb_mode", OM_DEFAULT_USBMODE);
+		obs_data_set_default_bool(settings, "hw_decode", OM_DEFAULT_HWDECODE);
 	}
 
 	void VideoTick(float /*seconds*/)
 	{
-		std::lock_guard<std::mutex> lock(m_updateMutex);
 		VideoTickImpl();
 	}
 
 	void VideoRender(gs_effect_t * /*effect*/)
 	{
-		//std::lock_guard<std::mutex> lock(m_updateMutex);
 		VideoRenderImpl();
 	}
 
 	void RefreshButtons(obs_properties_t *props)
 	{
-		obs_property_set_enabled(obs_properties_get(props, "connect"), isSocketInvalid(m_connectSocket));
-		obs_property_set_enabled(obs_properties_get(props, "use_adb"), isSocketInvalid(m_connectSocket));
-		obs_property_set_enabled(obs_properties_get(props, "disconnect"), !isSocketInvalid(m_connectSocket));
+		bool usbModeAllowed = true;
+		std::string adb_cmd = "adb version";
+#ifdef _WIN32
+		if (system(adb_cmd.c_str()) == 1) {
+			usbModeAllowed = false;
+			OM_LOG(LOG_ERROR, "ADB is missing from your system's PATH.");
+		}
+#endif
+
+		obs_property_set_enabled(obs_properties_get(props, "ipaddr"), isSocketInvalid(m_connectSocket));
+		obs_property_set_enabled(obs_properties_get(props, "port"), isSocketInvalid(m_connectSocket));
+		obs_property_set_enabled(obs_properties_get(props, "usb_mode"), usbModeAllowed && isSocketInvalid(m_connectSocket));
+		obs_property_set_enabled(obs_properties_get(props, "hw_decode"), isSocketInvalid(m_connectSocket));
 	}
 
-	bool ConnectClicked(obs_properties_t *props,  obs_property_t * /*property*/)
+	bool IsConnected() const
+	{
+		return !isSocketInvalid(m_connectSocket);
+	}
+
+	bool ConnectClicked(obs_properties_t *props)
 	{
 		OM_BLOG(LOG_INFO, "ConnectClicked");
 
-		std::lock_guard<std::mutex> lock(m_updateMutex);
 		Connect();
 		RefreshButtons(props);
 
 		return true;
 	}
 
-	bool DisconnectClicked(obs_properties_t *props, obs_property_t * /*property*/)
+	bool DisconnectClicked(obs_properties_t *props)
 	{
 		OM_BLOG(LOG_INFO, "DisconnectClicked");
 
-		std::lock_guard<std::mutex> lock(m_updateMutex);
 		Disconnect();
 		RefreshButtons(props);
 
@@ -265,11 +298,6 @@ private:
 			OM_BLOG(LOG_ERROR, "Unable to find decoder");
 		} else {
 			OM_BLOG(LOG_INFO, "Codec found. Capabilities 0x%x", m_codec->capabilities);
-		}
-
-		std::string adb_cmd = GetAdbPath() + "adb version";
-		if (system(adb_cmd.c_str()) == 1) {
-			OM_BLOG(LOG_ERROR, "ADB is missing from your system's PATH.");
 		}
 
 		obs_enter_graphics();
@@ -314,6 +342,7 @@ private:
 		}
 
 		// Hardware acceleration for decoding
+		if(m_hw_decode)
 		{
 			enum AVHWDeviceType hw_priority[] = {
 				AV_HWDEVICE_TYPE_D3D11VA,      AV_HWDEVICE_TYPE_DXVA2,
@@ -391,10 +420,11 @@ private:
 	// settings
 	uint32_t m_width = OM_DEFAULT_WIDTH;
 	uint32_t m_height = OM_DEFAULT_HEIGHT;
-	uint32_t m_audioSampleRate = OM_DEFAULT_AUDIO_SAMPLERATE;
+	uint32_t m_audioSampleRate = 0;
 	std::string m_ipaddr = OM_DEFAULT_IP_ADDRESS;
 	uint32_t m_port = OM_DEFAULT_PORT;
-	bool m_usbMode = OM_DEFAULT_USEADB;
+	bool m_usbMode = OM_DEFAULT_USBMODE;
+	bool m_hw_decode = OM_DEFAULT_HWDECODE;
 
 	std::mutex m_updateMutex;
 
@@ -423,29 +453,26 @@ private:
 
 	uint8_t* m_codecScaleData = nullptr;
 
-	std::list<std::pair<int, std::shared_ptr<Frame>>> m_cachedAudioFrames;
 	int m_audioFrameIndex = 0;
 	int m_videoFrameIndex = 0;
+	int m_processedAudioFrameIndex = 0;
+	int m_processedVideoFrameIndex = 0;
 
 	void Update(obs_data_t *settings)
 	{
-		m_usbMode = obs_data_get_bool(settings, "use_adb");
+		m_usbMode = obs_data_get_bool(settings, "usb_mode");
 		m_width = (uint32_t)obs_data_get_int(settings, "width");
 		m_height = (uint32_t)obs_data_get_int(settings, "height");
 		m_ipaddr = m_usbMode ? "127.0.0.1" : obs_data_get_string(settings, "ipaddr");
 		m_port = (uint32_t)obs_data_get_int(settings, "port");
+		m_hw_decode = obs_data_get_bool(settings, "hw_decode");
 	}
 
 	uint32_t GetWidth() { return m_width; }
-
 	uint32_t GetHeight() { return m_height; }
 
 	void ReceiveData()
 	{
-		if (isSocketInvalid(m_connectSocket)) {
-			return;
-		}
-
 		for (;;) {
 			fd_set socketSet = {0};
 			FD_ZERO(&socketSet);
@@ -475,50 +502,18 @@ private:
 		}
 	}
 
-	void ProcessAudioFrames()
-	{
-		while (m_cachedAudioFrames.size() > 0 && m_cachedAudioFrames.front().first <= m_videoFrameIndex) {
-			std::shared_ptr<Frame> audioFrame = m_cachedAudioFrames.front().second;
-			m_cachedAudioFrames.pop_front();
-
-			const AudioDataHeader* audioDataHeader = (AudioDataHeader*)(audioFrame->m_payload.data());
-			
-			if (audioDataHeader->channels == 1 || audioDataHeader->channels == 2) {
-				obs_source_audio audio = { 0 };
-				audio.data[0] = (uint8_t*)audioFrame->m_payload.data() + sizeof(AudioDataHeader);
-				audio.frames = audioDataHeader->dataLength / sizeof(float) / audioDataHeader->channels;
-				audio.speakers = audioDataHeader->channels == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO;
-				audio.format = AUDIO_FORMAT_FLOAT;
-				audio.samples_per_sec = m_audioSampleRate;
-				audio.timestamp = audioDataHeader->timestamp;
-				obs_source_output_audio(m_src, &audio);
-			} else {
-				OM_BLOG(LOG_ERROR, "[AUDIO_DATA] unimplemented audio channels %d", audioDataHeader->channels);
-			}
-		}
-	}
-
 	void VideoTickImpl()
 	{
-		if (isSocketInvalid(m_connectSocket))
+		if (!IsConnected()){
 			return;
+		}
 
 		ReceiveData();
 
-		if (isSocketInvalid(m_connectSocket)) // socket disconnected
-			return;
+		std::lock_guard<std::mutex> lock(m_updateMutex);
 
-		//std::chrono::time_point<std::chrono::system_clock> startTime = std::chrono::system_clock::now();
 		while (m_frameCollection.HasCompletedFrame()) {
-			//std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - startTime;
-			//if (timePassed.count() > 0.05)
-			//	break;
-
 			auto frame = m_frameCollection.PopFrame();
-
-			//auto current_time = std::chrono::system_clock::now();
-			//auto seconds_since_epoch = std::chrono::duration<double>(current_time.time_since_epoch()).count();
-			//double latency = seconds_since_epoch - frame->m_secondsSinceEpoch;
 
 			if (frame->m_type == PayloadType::VIDEO_DIMENSION) {
 				const FrameDimension *dim = (const FrameDimension *)frame->m_payload.data();
@@ -527,6 +522,8 @@ private:
 
 				OM_BLOG(LOG_INFO, "[VIDEO_DIMENSION] width %d height %d", m_width, m_height);
 			} else if (frame->m_type == PayloadType::VIDEO_DATA) {
+				++m_videoFrameIndex;
+
 				av_new_packet(m_avPacket, (int)frame->m_payload.size());
 				assert(m_avPacket->data);
 				memcpy(m_avPacket->data, frame->m_payload.data(), frame->m_payload.size());
@@ -534,112 +531,153 @@ private:
 				int ret = avcodec_send_packet(m_codecContext, m_avPacket);
 				if (ret < 0) {
 					OM_BLOG(LOG_ERROR, "avcodec_send_packet error %s", GetAvErrorString(ret).c_str());
-				} else {
-					AVFrame* recievePicture = (m_codecHwPixFmt != AV_PIX_FMT_NONE) ? m_avPictureHw : m_avPicture;
-					ret = avcodec_receive_frame(m_codecContext, recievePicture);
-					if (ret < 0) {
-						OM_BLOG(LOG_ERROR, "avcodec_receive_frame error %s", GetAvErrorString(ret).c_str());
-					} else {
+					continue;
+				} 
+
+				AVFrame* receivePicture = (m_codecHwPixFmt != AV_PIX_FMT_NONE) ? m_avPictureHw : m_avPicture;
+				ret = avcodec_receive_frame(m_codecContext, receivePicture);
+				if (ret < 0) {
+					OM_BLOG(LOG_ERROR, "avcodec_receive_frame error %s", GetAvErrorString(ret).c_str());
+					continue;
+				}
 #if _DEBUG
-						std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
-						OM_BLOG(LOG_DEBUG, "[%f][VIDEO_DATA] size %d width %d height %d format %d",
-							timePassed.count(), packet->size, picture->width, picture->height, picture->format);
+				std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
+				OM_BLOG(LOG_DEBUG, "[%d][VIDEO_DATA] size %d width %d height %d format %d",
+					timePassed, m_avPacket->size, receivePicture->width, receivePicture->height, receivePicture->format);
 #endif
-						++m_videoFrameIndex;
+				AVFrame* usePicture = m_avPicture;
+				if (m_hw_decode && receivePicture->format == m_codecHwPixFmt) {
+					// retrieve data from GPU to CPU
+					ret = av_hwframe_transfer_data(m_avPicture, m_avPictureHw, 0);
 
-						AVFrame* usePicture = m_avPicture;
-						if (recievePicture->format == m_codecHwPixFmt) {
-							// retrieve data from GPU to CPU
-							ret = av_hwframe_transfer_data(m_avPicture, m_avPictureHw, 0);
+					if (ret != 0) {
+						OM_BLOG(LOG_ERROR, "av_hwframe_transfer_data error %s", GetAvErrorString(ret).c_str());
+						continue;
+					}
+					m_avPicture->color_range = m_avPictureHw->color_range;
+					m_avPicture->color_primaries = m_avPictureHw->color_primaries;
+					m_avPicture->color_trc = m_avPictureHw->color_trc;
+					m_avPicture->colorspace = m_avPictureHw->colorspace;
+				} else {
+					usePicture = receivePicture;
+				}
 
-							if (ret != 0) {
-								OM_BLOG(LOG_ERROR, "av_hwframe_transfer_data error %s", GetAvErrorString(ret).c_str());
-								continue;
-							}
-							m_avPicture->color_range = m_avPictureHw->color_range;
-							m_avPicture->color_primaries = m_avPictureHw->color_primaries;
-							m_avPicture->color_trc = m_avPictureHw->color_trc;
-							m_avPicture->colorspace = m_avPictureHw->colorspace;
-						} else {
-							usePicture = recievePicture;
-						}
+				if (m_swsContext != nullptr) {
+					if (m_swsContext_SrcWidth != m_codecContext->width ||  m_swsContext_SrcHeight != m_codecContext->height ||
+						m_swsContext_SrcPixelFormat != m_codecContext->pix_fmt ||
+						m_swsContext_DestWidth != m_codecContext->width || m_swsContext_DestHeight !=  m_codecContext->height) {
 
-						if (m_swsContext != nullptr) {
-							if (m_swsContext_SrcWidth != m_codecContext->width ||  m_swsContext_SrcHeight != m_codecContext->height ||
-								m_swsContext_SrcPixelFormat != m_codecContext->pix_fmt ||
-								m_swsContext_DestWidth != m_codecContext->width || m_swsContext_DestHeight !=  m_codecContext->height) {
-
-								OM_BLOG(LOG_DEBUG, "Need recreate m_swsContext");
-								sws_freeContext(m_swsContext);
-								m_swsContext = nullptr;
-								delete[] m_codecScaleData;
-								m_codecScaleData = nullptr;
-							}
-						}
-
-						if (m_swsContext == nullptr) {
-							m_swsContext = sws_getContext(
-								m_codecContext->width, m_codecContext->height,
-								m_codecContext->pix_fmt,
-								m_codecContext->width, m_codecContext->height,
-								AV_PIX_FMT_RGBA,
-								SWS_POINT,
-								nullptr,
-								nullptr,
-								nullptr);
-
-							m_swsContext_SrcWidth = m_codecContext->width;
-							m_swsContext_SrcHeight = m_codecContext->height;
-							m_swsContext_SrcPixelFormat = m_codecContext->pix_fmt;
-							m_swsContext_DestWidth = m_codecContext->width;
-							m_swsContext_DestHeight = m_codecContext->height;
-							OM_BLOG(LOG_DEBUG, "sws_getContext(%d, %d, %d)", m_codecContext->width, m_codecContext->height, m_codecContext->pix_fmt);
-
-							m_codecScaleData = new uint8_t[m_codecContext->width * m_codecContext->height * 4];
-						}
-
-						assert(m_swsContext);
-						uint8_t* data[1] = {
-							m_codecScaleData
-						};
-						int stride[1] = { 
-							(int)m_codecContext->width * 4
-						};
-						sws_scale(m_swsContext, usePicture->data, usePicture->linesize, 0, usePicture->height, data, stride);
+						OM_BLOG(LOG_DEBUG, "Need recreate m_swsContext");
+						sws_freeContext(m_swsContext);
+						m_swsContext = nullptr;
+						delete[] m_codecScaleData;
+						m_codecScaleData = nullptr;
 
 						obs_enter_graphics();
 						if (m_temp_texture) {
 							gs_texture_destroy(m_temp_texture);
 							m_temp_texture = nullptr;
 						}
-						m_temp_texture = gs_texture_create(m_codecContext->width, m_codecContext->height, GS_RGBA, 1, const_cast<const uint8_t**>(&data[0]), 0);
 						obs_leave_graphics();
 					}
 				}
+
+				if (m_swsContext == nullptr) {
+					m_swsContext = sws_getContext(
+						m_codecContext->width, m_codecContext->height,
+						m_codecContext->pix_fmt,
+						m_codecContext->width, m_codecContext->height,
+						AV_PIX_FMT_RGBA,
+						SWS_POINT,
+						nullptr,
+						nullptr,
+						nullptr);
+
+					m_swsContext_SrcWidth = m_codecContext->width;
+					m_swsContext_SrcHeight = m_codecContext->height;
+					m_swsContext_SrcPixelFormat = m_codecContext->pix_fmt;
+					m_swsContext_DestWidth = m_codecContext->width;
+					m_swsContext_DestHeight = m_codecContext->height;
+					OM_BLOG(LOG_DEBUG, "sws_getContext(%d, %d, %d)", m_codecContext->width, m_codecContext->height, m_codecContext->pix_fmt);
+
+					m_codecScaleData = new uint8_t[m_codecContext->width * m_codecContext->height * 4];
+				}
+
+				assert(m_swsContext);
+				uint8_t* data[1] = {
+					m_codecScaleData
+				};
+				int stride[1] = { 
+					(int)m_codecContext->width * 4
+				};
+				sws_scale(m_swsContext, usePicture->data, usePicture->linesize, 0, usePicture->height, data, stride);
+
+				obs_enter_graphics();
+				if (m_temp_texture) {
+					gs_texture_destroy(m_temp_texture);
+					m_temp_texture = nullptr;
+				}
+				m_temp_texture = gs_texture_create(m_codecContext->width, m_codecContext->height, GS_RGBA, 1, const_cast<const uint8_t**>(&data[0]), 0);
+				obs_leave_graphics();
+
+				m_processedVideoFrameIndex = m_videoFrameIndex;
+#if _DEBUG
+				OM_BLOG(LOG_DEBUG, "[VIDEO_DATA] frameTS %lld VFI=%d AFI=%d", frame->m_timeStamp, m_audioFrameIndex, m_videoFrameIndex);
+#endif
 			} else if (frame->m_type == PayloadType::AUDIO_SAMPLERATE) {
 				m_audioSampleRate = *(uint32_t *)(frame->m_payload.data());
 				OM_BLOG(LOG_DEBUG, "[AUDIO_SAMPLERATE] %d", m_audioSampleRate);
 			} else if (frame->m_type == PayloadType::AUDIO_DATA) {
-				m_cachedAudioFrames.push_back(std::make_pair(m_audioFrameIndex, frame));
 				++m_audioFrameIndex;
+
+				// NOTE: audioDataHeader timestamp is ZERO, as well as AVPacket timestamp...
+				//		 looks like it is broken and there's no way to properly sync
+				//		 audio and video at this point
+				
+				const AudioDataHeader* audioDataHeader = (AudioDataHeader*)(frame->m_payload.data());
+				if (m_videoFrameIndex > 0 && m_audioSampleRate != 0) {
+						if(audioDataHeader->channels == 1 || audioDataHeader->channels == 2) {
+						const uint8_t* audioData = (uint8_t*)frame->m_payload.data() + sizeof(AudioDataHeader);
+						const uint32_t numSamples = audioDataHeader->dataLength / sizeof(float) / audioDataHeader->channels;
+
+						obs_source_audio audio = { 0 };
+						audio.data[0] = (uint8_t*)audioData;
+						audio.frames = numSamples;
+						audio.speakers = audioDataHeader->channels == 1 ? SPEAKERS_MONO : SPEAKERS_STEREO;
+						audio.format = AUDIO_FORMAT_FLOAT;
+						audio.samples_per_sec = m_audioSampleRate;
+						audio.timestamp = frame->m_timeStamp - (300 * 1000000); // os_gettime_ns();
+						obs_source_output_audio(m_src, &audio);
+
+						m_processedAudioFrameIndex = m_audioFrameIndex;
+#if _DEBUG
+						OM_BLOG(LOG_DEBUG, "[AUDIO_DATA] frameTS %lld AFI=%d VFI=%d", frame->m_timeStamp, m_audioFrameIndex, m_videoFrameIndex);
+#endif
+					} else {
+						OM_BLOG(LOG_ERROR, "[AUDIO_DATA] unimplemented audio channels %d", audioDataHeader->channels);
+					}
+
+				}
 #if _DEBUG
 				std::chrono::duration<double> timePassed = std::chrono::system_clock::now() - m_frameCollection.GetFirstFrameTime();
 				OM_BLOG(LOG_DEBUG, "[%f][AUDIO_DATA] timestamp %llu", timePassed.count());
 #endif
 			} 
-#if _DEBUG
 			else if (frame->m_type == PayloadType::CAPTURE_CONTROL_DATA) {
 				OM_BLOG(LOG_DEBUG, "[CAPTURE_CONTROL_DATA] Got CAPTURE_CONTROL_DATA");
 			} else if (frame->m_type == PayloadType::DATA_VERSION) {
 				OM_BLOG(LOG_DEBUG, "[DATA_VERSION] Got DATA_VERSION");
 			} else {
-				OM_BLOG(LOG_ERROR, "Unknown payload type: %u", frame->m_type);
-			}
+#if _DEBUG
+				std::stringstream tempStr;
+				unsigned char* data = (unsigned char*)frame->m_payload.data();
+				for (unsigned long i = 0; i < frame->m_payload.size(); i++) {
+					tempStr << std::hex << (int)data[i];
+				}
+				OM_BLOG(LOG_DEBUG, "Unknown payload type: %u, size %lld, bytes %s", frame->m_type, frame->m_payload.size(), tempStr.str().c_str());
 #endif
+			}
 		}
-
-		// extra processing of audio frames
-		ProcessAudioFrames();
 	}
 
 	void VideoRenderImpl()
@@ -651,7 +689,7 @@ private:
 		}
 #endif
 
-		if (m_temp_texture) {
+		if (IsConnected() && m_temp_texture) {
 			gs_technique_t *tech = gs_effect_get_technique(m_mrc_effect, "Frame");
 
 			gs_technique_begin(tech);
@@ -676,11 +714,14 @@ private:
 
 	void Connect()
 	{
+		std::lock_guard<std::mutex> lock(m_updateMutex);
+
 		if (m_usbMode) {
 			m_ipaddr = "127.0.0.1";
 			std::string adb_forwardcmd = string_format("adb forward tcp:%d tcp:%d", m_port, m_port);
-			std::string adb_cmd = GetAdbPath() + adb_forwardcmd;
-			system(adb_cmd.c_str());
+#ifdef _WIN32
+			system(adb_forwardcmd.c_str());
+#endif
 		}
 
 		if (!isSocketInvalid(m_connectSocket)) {
@@ -745,10 +786,8 @@ private:
 					time_out.tv_sec = 2;
 					time_out.tv_usec = 0;
 
-					int ret = select(0, NULL, &setW, &setE,
-							 &time_out);
-					if (ret > 0 &&
-					    !FD_ISSET(m_connectSocket, &setE)) {
+					int ret = select(0, NULL, &setW, &setE, &time_out);
+					if (ret > 0 && !FD_ISSET(m_connectSocket, &setE)) {
 						hasError = false;
 					}
 				}
@@ -777,10 +816,12 @@ private:
 		m_codecScaleData = nullptr;
 
 		m_frameCollection.Reset();
-		m_cachedAudioFrames.clear();
 
 		m_audioFrameIndex = 0;
 		m_videoFrameIndex = 0;
+		m_processedAudioFrameIndex = 0;
+		m_processedVideoFrameIndex = 0;
+		m_audioSampleRate = 0;
 
 		if (!isSocketInvalid(m_connectSocket)) {
 			StartDecoder();
@@ -789,6 +830,8 @@ private:
 
 	void Disconnect()
 	{
+		std::lock_guard<std::mutex> lock(m_updateMutex);
+
 		if (isSocketInvalid(m_connectSocket)) {
 			OM_BLOG(LOG_ERROR, "Not connected");
 			return;
@@ -796,18 +839,20 @@ private:
 
 		if (m_usbMode) {
 			std::string adb_forwardcmd = string_format("adb forward --remove tcp:%d", m_port);
-			std::string adb_cmd = GetAdbPath() + adb_forwardcmd;
-			system(adb_cmd.c_str());
+#ifdef _WIN32
+			system(adb_forwardcmd.c_str());
+#endif
 		}
 
-		StopDecoder();
-
+		OM_BLOG(LOG_INFO, "Closing socket...");
 		int ret = closeSocket(m_connectSocket);
 		if (ret != 0) {
 			OM_BLOG(LOG_ERROR, "closeSocket error %d", ret);
 		}
 		m_connectSocket = INVALID_SOCKET;
 		OM_BLOG(LOG_INFO, "Socket disconnected");
+
+		StopDecoder();
 	}
 };
 
@@ -835,9 +880,11 @@ bool obs_module_load(void)
 	struct obs_source_info oculus_mrc_source_info = {0};
 	oculus_mrc_source_info.id = "oculus_mrc_source";
 	oculus_mrc_source_info.type = OBS_SOURCE_TYPE_INPUT;
-	oculus_mrc_source_info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO /* | OBS_SOURCE_CUSTOM_DRAW*/;
+	oculus_mrc_source_info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
 	oculus_mrc_source_info.create = &OculusMrcSource::Create;
 	oculus_mrc_source_info.destroy = &OculusMrcSource::Destroy;
+	oculus_mrc_source_info.show = &OculusMrcSource::Show;
+	oculus_mrc_source_info.hide = &OculusMrcSource::Hide;
 	oculus_mrc_source_info.update = &OculusMrcSource::Update;
 	oculus_mrc_source_info.get_name = &OculusMrcSource::GetName;
 	oculus_mrc_source_info.get_defaults = &OculusMrcSource::GetDefaults;
@@ -846,6 +893,7 @@ bool obs_module_load(void)
 	oculus_mrc_source_info.video_tick = &OculusMrcSource::VideoTick;
 	oculus_mrc_source_info.video_render = &OculusMrcSource::VideoRender;
 	oculus_mrc_source_info.get_properties = &OculusMrcSource::GetProperties;
+	oculus_mrc_source_info.icon_type = OBS_ICON_TYPE_CAMERA;
 
 	obs_register_source(&oculus_mrc_source_info);
 	return true;

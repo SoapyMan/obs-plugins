@@ -15,6 +15,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
+#include <util/platform.h>
 #include "frame.h"
 #include "log.h"
 
@@ -70,7 +71,8 @@ void FrameCollection::AddData(const uint8_t *data, uint32_t len)
 
 			std::shared_ptr<Frame> frame = std::make_shared<Frame>();
 			frame->m_type = (PayloadType)frameHeader->PayloadType;
-			//frame->m_secondsSinceEpoch = frameHeader->SecondsSinceEpoch;
+			frame->m_timeStamp = os_gettime_ns();
+
 			const auto first = m_scratchPad.begin() + sizeof(ovrmPayloadHeader);
 			const auto last = first + frameHeader->PayloadLength;
 

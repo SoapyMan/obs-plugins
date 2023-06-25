@@ -31,7 +31,7 @@ typedef struct {
 } ovrmVersion;
 
 namespace ovrmConstants {
-const static uint32_t Magic = 0x2877AF94;
+	const static uint32_t Magic = 0x2877AF94;
 }
 
 enum class PayloadType : uint32_t {
@@ -40,6 +40,7 @@ enum class PayloadType : uint32_t {
 	AUDIO_SAMPLERATE = 12,
 	AUDIO_DATA = 13,
 	CAPTURE_CONTROL_DATA = 14,
+
 	DATA_VERSION = 15,
 };
 
@@ -48,12 +49,6 @@ struct ovrmPayloadHeader {
 	uint32_t TotalDataLengthExcludingMagic;
 	uint32_t PayloadType;
 	uint32_t PayloadLength;
-};
-
-struct Frame {
-	PayloadType m_type;
-	double m_secondsSinceEpoch;
-	std::vector<uint8_t> m_payload;
 };
 
 struct AudioDataHeader {
@@ -67,7 +62,12 @@ struct FrameDimension {
 	int h;
 };
 
-//typedef std::vector<uint8_t> Frame;
+struct Frame {
+	PayloadType m_type;
+	uint64_t m_timeStamp;
+	//double m_secondsSinceEpoch;
+	std::vector<uint8_t> m_payload;
+};
 
 class FrameCollection {
 public:
@@ -75,22 +75,15 @@ public:
 	~FrameCollection();
 
 	void Reset();
-
 	void AddData(const uint8_t *data, uint32_t len);
-
 	bool HasCompletedFrame();
-
 	std::shared_ptr<Frame> PopFrame();
-
 	bool HasError() const { return m_hasError; }
 
-	bool HasFirstFrame() const
-	{
-		return m_firstFrameTimeSet && !m_hasError;
-	}
+	bool HasFirstFrame() const { return m_firstFrameTimeSet && !m_hasError; }
+	size_t GetCount() const { return m_frames.size(); }
 
-	std::chrono::time_point<std::chrono::system_clock>
-	GetFirstFrameTime() const
+	std::chrono::time_point<std::chrono::system_clock> GetFirstFrameTime() const
 	{
 		if (m_firstFrameTimeSet) {
 			return m_firstFrameTime;
