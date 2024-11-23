@@ -1,18 +1,4 @@
-project(oculus-mrc)
-
-option(ENABLE_OCULUS_MRC "Enable Oculus MRC plugin" ON)
-
-if(NOT ENABLE_OCULUS_MRC)
-  target_disable(oculus-mrc)
-  return()
-endif()
-
-if(MSVC)
-	set(oculus-mrc_PLATFORM_DEPS w32-pthreads)
-endif()
-
-find_package(FFmpeg REQUIRED COMPONENTS avcodec avfilter avdevice avutil swscale avformat swresample)
-include_directories(${FFMPEG_INCLUDE_DIRS})
+cmake_minimum_required(VERSION 3.28...3.30)
 
 add_library(oculus-mrc MODULE)
 add_library(OBS::oculus-mrc ALIAS oculus-mrc)
@@ -23,8 +9,18 @@ target_sources(oculus-mrc PRIVATE
 	frame.h
 	frame.cpp
 )
-target_link_libraries(oculus-mrc PRIVATE OBS::libobs ${oculus-mrc_PLATFORM_DEPS} ${FFMPEG_LIBRARIES})
+target_link_libraries(
+  oculus-mrc
+  PRIVATE
+    OBS::libobs
+    FFmpeg::avcodec
+    FFmpeg::avfilter
+    FFmpeg::avformat
+    FFmpeg::avdevice
+    FFmpeg::avutil
+    FFmpeg::swscale
+    FFmpeg::swresample
+    $<$<PLATFORM_ID:Windows>:OBS::w32-pthreads>
+)
 
-set_target_properties(oculus-mrc PROPERTIES FOLDER "plugins")
-
-setup_plugin_target(oculus-mrc)
+set_target_properties_obs(oculus-mrc PROPERTIES FOLDER plugins/oculus-mrc PREFIX "")

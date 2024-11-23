@@ -400,7 +400,6 @@ private:
 		m_codecHwPixFmt = AV_PIX_FMT_NONE;
 
 		if (m_codecContext) {
-			avcodec_close(m_codecContext);
 			avcodec_free_context(&m_codecContext);
 			OM_BLOG(LOG_INFO, "m_codecContext freed");
 		}
@@ -667,7 +666,10 @@ private:
 				OM_BLOG(LOG_DEBUG, "[CAPTURE_CONTROL_DATA] Got CAPTURE_CONTROL_DATA");
 			} else if (frame->m_type == PayloadType::DATA_VERSION) {
 				OM_BLOG(LOG_DEBUG, "[DATA_VERSION] Got DATA_VERSION");
-			} else {
+			} else if (frame->m_type == PayloadType::CAMERA_POSE_TIMESTAMP) {
+				OM_BLOG(LOG_DEBUG, "[DATA_VERSION] Got CAMERA_POSE_TIMESTAMP");
+			}
+			else {
 #if _DEBUG
 				std::stringstream tempStr;
 				unsigned char* data = (unsigned char*)frame->m_payload.data();
